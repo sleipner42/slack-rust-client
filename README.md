@@ -1,7 +1,7 @@
 # Better Slack
 
-A compact, unofficial Slack client for macOS, written in Rust with egui and
-Metal rendering. Inspired by old IRC clients: readable, restrained, and fast.
+A compact, unofficial Slack client for macOS and Linux, written in Rust with
+egui and wgpu. Inspired by old IRC clients: readable, restrained, and fast.
 
 - Channels, DMs, threads, reactions, inline images, and unread indicators.
 - Activity feed with mentions, replies, reactions, and read-on-open behavior.
@@ -19,8 +19,15 @@ Requires a recent stable Rust toolchain and Xcode Command Line Tools on macOS.
 cargo run --release --locked
 ```
 
-Uses your existing local Slack session or opens Slack sign-in. Credentials and
-cached messages stay in your macOS user directories, outside this repository.
+On Linux, install `pkg-config` and the development packages for D-Bus, GTK 3,
+WebKitGTK 4.1, and libsoup 3 (e.g. `libdbus-1-dev libgtk-3-dev
+libwebkit2gtk-4.1-dev libsoup-3.0-dev` on Debian/Ubuntu). On NixOS, run the
+commands inside `nix-shell`. Ctrl replaces Cmd in shortcuts.
+
+Uses your existing local Slack desktop session or opens Slack sign-in. On
+Linux, a keyring-encrypted session needs a running Secret Service (e.g. GNOME
+Keyring or KeePassXC). Credentials and cached messages stay in
+your user config and cache directories, outside this repository.
 Some features use internal Slack APIs and may change without notice.
 
 ## Build and check

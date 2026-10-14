@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use crate::domain::model::SlackError;
 
+// Only the macOS clipboard reader produces attachments so far.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum ClipboardAttachment {
     Files(Vec<PathBuf>),
     Image(Vec<u8>),

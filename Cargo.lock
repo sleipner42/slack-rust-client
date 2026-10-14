@@ -494,6 +494,7 @@ dependencies = [
  "block2 0.6.2",
  "cbc",
  "chrono",
+ "dbus",
  "dirs",
  "eframe",
  "egui_extras",

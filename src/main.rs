@@ -35,7 +35,7 @@ fn main() -> eframe::Result {
 }
 
 fn import_from_desktop_app(store: &CredentialStore) -> Option<Credentials> {
-    let slack_data_dir = dirs::data_dir()?.join(SLACK_DATA_DIRECTORY);
+    let slack_data_dir = slack_data_directory()?;
     let scratch_dir = app_directory().join(IMPORT_SCRATCH_DIRECTORY);
     fs::create_dir_all(&scratch_dir).ok()?;
     let result = import_desktop_session(&slack_data_dir, &scratch_dir);
@@ -50,6 +50,25 @@ fn import_from_desktop_app(store: &CredentialStore) -> Option<Credentials> {
             None
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn slack_data_directory() -> Option<PathBuf> {
+    Some(dirs::data_dir()?.join(SLACK_DATA_DIRECTORY))
+}
+
+#[cfg(target_os = "linux")]
+fn slack_data_directory() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    [
+        dirs::config_dir()?.join(SLACK_DATA_DIRECTORY),
+        home.join(".var/app/com.slack.Slack/config")
+            .join(SLACK_DATA_DIRECTORY),
+        home.join("snap/slack/current/.config")
+            .join(SLACK_DATA_DIRECTORY),
+    ]
+    .into_iter()
+    .find(|directory| directory.is_dir())
 }
 
 fn sign_in(store: &CredentialStore) -> Credentials {

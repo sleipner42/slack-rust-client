@@ -2,8 +2,8 @@ use serde::Deserialize;
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
-use tao::window::WindowBuilder;
-use wry::WebViewBuilder;
+use tao::window::{Window, WindowBuilder};
+use wry::{WebView, WebViewBuilder};
 
 use crate::domain::model::Credentials;
 use crate::infrastructure::credential_store::CredentialStore;
@@ -25,7 +25,7 @@ pub fn run_login_window(store: CredentialStore) -> ! {
                 let _ = proxy.send_event(session);
             }
         })
-        .build(&window)
+        .build_for_window(&window)
         .expect("failed to create login webview");
 
     event_loop.run(move |event, _, control_flow| {
@@ -49,6 +49,31 @@ pub fn run_login_window(store: CredentialStore) -> ! {
     })
 }
 
+trait BuildForWindow {
+    fn build_for_window(self, window: &Window) -> wry::Result<WebView>;
+}
+
+#[cfg(not(target_os = "linux"))]
+impl BuildForWindow for WebViewBuilder<'_> {
+    fn build_for_window(self, window: &Window) -> wry::Result<WebView> {
+        self.build(window)
+    }
+}
+
+// wry only supports `build` on X11; a GTK container also works under Wayland.
+#[cfg(target_os = "linux")]
+impl BuildForWindow for WebViewBuilder<'_> {
+    fn build_for_window(self, window: &Window) -> wry::Result<WebView> {
+        use tao::platform::unix::WindowExtUnix;
+        use wry::WebViewBuilderExtUnix;
+        self.build_gtk(
+            window
+                .default_vbox()
+                .expect("login window has no GTK container"),
+        )
+    }
+}
+
 #[derive(Deserialize)]
 struct TeamSession {
     token: String,
@@ -67,7 +92,7 @@ impl TeamSession {
     }
 }
 
-fn find_session_cookie(webview: &wry::WebView) -> Option<String> {
+fn find_session_cookie(webview: &WebView) -> Option<String> {
     webview
         .cookies()
         .ok()?
