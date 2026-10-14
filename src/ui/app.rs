@@ -516,12 +516,25 @@ impl ChatApp {
                         }
                     }
                 } else {
+                    let open = self
+                        .selected
+                        .as_ref()
+                        .map(|conversation| conversation.id.as_str());
+                    let mut first = true;
                     for (index, group) in workspace.sidebar.iter().enumerate() {
-                        if index > 0 {
+                        let conversations: Vec<_> = group
+                            .conversations
+                            .iter()
+                            .filter(|conversation| shown_in_sidebar(workspace, conversation, open))
+                            .collect();
+                        if conversations.is_empty() {
+                            continue;
+                        }
+                        if !first {
                             ui.add_space(8.0);
                         }
-                        let unread = group
-                            .conversations
+                        first = false;
+                        let unread = conversations
                             .iter()
                             .filter(|conversation| needs_attention(workspace, &conversation.id))
                             .count();
@@ -541,7 +554,7 @@ impl ChatApp {
                         .default_open(true)
                         .show(ui, |ui| {
                             ui.spacing_mut().item_spacing.y = 2.0;
-                            for conversation in &group.conversations {
+                            for conversation in conversations {
                                 if sidebar_row(ui, workspace, conversation, selected) {
                                     clicked = Some(conversation.clone());
                                 }
@@ -1555,6 +1568,21 @@ fn needs_attention(workspace: &Workspace, id: &str) -> bool {
     })
 }
 
+/// Muted channels are hidden like Slack's "Mute and hide", except while open
+/// or when they mention you. They stay reachable through the quick switcher.
+fn shown_in_sidebar(
+    workspace: &Workspace,
+    conversation: &Conversation,
+    open: Option<&str>,
+) -> bool {
+    !workspace.muted.contains(&conversation.id)
+        || open == Some(conversation.id.as_str())
+        || workspace
+            .read_states
+            .get(&conversation.id)
+            .is_some_and(|state| state.mention_count > 0)
+}
+
 fn sidebar_row(
     ui: &mut egui::Ui,
     workspace: &Workspace,
@@ -1840,6 +1868,23 @@ mod tests {
         assert_eq!(app.new_after, None);
         app.select(conversation(&app, "D1"));
         assert_eq!(app.new_after, None);
+    }
+
+    #[test]
+    fn muted_conversations_are_hidden_unless_open_or_mentioning() {
+        let mut app = app();
+        let workspace = app.workspace.as_mut().unwrap();
+        workspace.muted.extend(["C1".to_string(), "C2".to_string()]);
+        let workspace = app.workspace.as_ref().unwrap();
+        let shown = |id, open| shown_in_sidebar(workspace, &conversation(&app, id), open);
+        assert!(
+            shown("C1", None),
+            "a muted channel with a mention stays visible"
+        );
+        assert!(!shown("C2", None));
+        assert!(shown("C2", Some("C2")));
+        assert!(!shown("C3", None), "muted in the demo workspace");
+        assert!(shown("D2", None));
     }
 
     #[test]
