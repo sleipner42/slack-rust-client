@@ -128,7 +128,7 @@ enum UiEvent {
 
 impl eframe::App for ChatApp {
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
-        let shortcut = self.paste_shortcut.take();
+        let shortcut = self.paste_shortcut.take(&input.events);
         let paste = input
             .events
             .iter()

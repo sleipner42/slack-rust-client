@@ -31,4 +31,5 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSArray", "NSData", "NSURL"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3.6", default-features = false, features = ["image-data", "wayland-data-control"] }
 dbus = "0.9"
