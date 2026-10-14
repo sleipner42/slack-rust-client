@@ -52,7 +52,7 @@ pub(super) const QUICK_REACTIONS: [(&str, &str); 3] = [
     ("question", "Question mark"),
 ];
 
-type RowSignature = (u64, bool, bool, bool, u8);
+type RowSignature = (u64, bool, bool, bool, bool, u8);
 
 pub fn message_list(
     ui: &mut egui::Ui,
@@ -88,11 +88,15 @@ pub fn message_list(
                 && previous.is_none_or(|previous| ts_seconds(&previous.ts) <= read)
         });
         let compact = !day && !new && previous.is_some_and(|previous| can_group(previous, message));
+        let expanded = ui
+            .data(|data| data.get_temp::<bool>(fold_id(&message.ts)))
+            .unwrap_or(false);
         let signature = (
             message.layout_key,
             compact,
             day,
             new,
+            expanded,
             context
                 .outbox
                 .delivery(message)
@@ -209,6 +213,7 @@ fn message_row(
     let confirmed = delivery.is_none_or(|state| matches!(state, Delivery::Confirmed));
     ui.add_space(if compact { 0.0 } else { 8.0 });
     let background = ui.painter().add(egui::Shape::Noop);
+    let mut fade = None;
     let response = egui::Frame::NONE
         .inner_margin(egui::Margin::symmetric(0, if compact { 2 } else { 6 }))
         .show(ui, |ui| {
@@ -245,7 +250,7 @@ fn message_row(
                             .on_hover_text(time.format("%A, %B %e, %Y at %H:%M:%S").to_string());
                         });
                     }
-                    render_blocks(ui, &message.blocks, context.emoji, context.images);
+                    fade = folded_blocks(ui, message, context);
                     match delivery {
                         Some(Delivery::Sending) => {
                             let label = if message.attachments.is_empty() {
@@ -339,7 +344,16 @@ fn message_row(
         }
         None => ui.rect_contains_pointer(response.rect),
     };
-    if confirmed && ui.is_enabled() && hovered {
+    let highlighted = confirmed && ui.is_enabled() && hovered;
+    if let Some((shape, rect)) = fade {
+        let color = if highlighted {
+            theme::HOVER
+        } else {
+            theme::BACKGROUND
+        };
+        ui.painter().set(shape, fade_out(rect, color));
+    }
+    if highlighted {
         ui.painter().set(
             background,
             egui::Shape::rect_filled(
@@ -684,6 +698,75 @@ pub(super) fn attachment_view(
     open
 }
 
+/// Long bodies (alert tracebacks and the like) start folded, as in Slack.
+/// Returns a placeholder for the fade, painted once the row background is known.
+fn folded_blocks(
+    ui: &mut egui::Ui,
+    message: &DisplayMessage,
+    context: &mut MessageContext<'_>,
+) -> Option<(egui::layers::ShapeIdx, egui::Rect)> {
+    let id = fold_id(&message.ts);
+    let expanded = ui.data(|data| data.get_temp::<bool>(id)).unwrap_or(false);
+    let top = ui.cursor().min;
+    let width = ui.available_width();
+    let mut body = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(egui::Rect::from_min_size(
+                top,
+                egui::vec2(width, f32::INFINITY),
+            ))
+            .layout(*ui.layout()),
+    );
+    let folded = !expanded;
+    if folded {
+        let mut clip = body.clip_rect();
+        clip.max.y = clip.max.y.min(top.y + FOLDED_HEIGHT);
+        body.set_clip_rect(clip);
+    }
+    render_blocks(&mut body, &message.blocks, context.emoji, context.images);
+    let full = body.min_rect();
+    let foldable = full.height() > FOLD_THRESHOLD;
+    let shown = if foldable && folded {
+        egui::Rect::from_min_size(full.min, egui::vec2(full.width(), FOLDED_HEIGHT))
+    } else {
+        full
+    };
+    ui.advance_cursor_after_rect(shown);
+    if !foldable {
+        return None;
+    }
+    let fade = folded.then(|| (ui.painter().add(egui::Shape::Noop), shown));
+    if ui
+        .link(if folded { "Show more" } else { "Show less" })
+        .clicked()
+    {
+        ui.data_mut(|data| data.insert_temp(id, folded));
+    }
+    fade
+}
+
+fn fold_id(ts: &str) -> egui::Id {
+    egui::Id::new(("message_fold", ts))
+}
+
+fn fade_out(rect: egui::Rect, color: egui::Color32) -> egui::Shape {
+    let fade =
+        egui::Rect::from_x_y_ranges(rect.x_range(), rect.bottom() - FADE_HEIGHT..=rect.bottom());
+    let mut mesh = egui::Mesh::default();
+    let clear = color.gamma_multiply(0.0);
+    mesh.colored_vertex(fade.left_top(), clear);
+    mesh.colored_vertex(fade.right_top(), clear);
+    mesh.colored_vertex(fade.left_bottom(), color);
+    mesh.colored_vertex(fade.right_bottom(), color);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(1, 2, 3);
+    egui::Shape::mesh(mesh)
+}
+
+const FOLD_THRESHOLD: f32 = 360.0;
+const FOLDED_HEIGHT: f32 = 220.0;
+const FADE_HEIGHT: f32 = 48.0;
+
 fn new_separator(ui: &mut egui::Ui) {
     ui.add_space(8.0);
     let (rect, _) =
@@ -956,6 +1039,78 @@ mod tests {
         );
         assert!(frame(&attachment, 200.0) < resolved_height);
         assert!((frame(&attachment, 700.0) - resolved_height).abs() < 1.0);
+    }
+
+    #[test]
+    fn long_messages_fold_until_expanded() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let service = Arc::new(ChatService::new(Arc::new(DemoGateway::new())));
+        let workspace = service.load_workspace().unwrap();
+        let template = service.messages("C1").unwrap().remove(0);
+        let message = |ts: &str, lines: usize| {
+            let mut message = template.clone();
+            message.ts = ts.into();
+            message.avatar_url = None;
+            message.attachments.clear();
+            message.reactions.clear();
+            message.reply_count = 0;
+            message.blocks = vec![Block::Paragraph(vec![Inline::Text {
+                text: vec!["File \"service.py\", line 1, in start"; lines].join("\n"),
+                style: TextStyle::default(),
+            }])];
+            message
+        };
+        let mut images = ImageCache::new(service, ctx.clone());
+        let mut height = |messages: &[DisplayMessage]| {
+            let mut height = 0.0;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(700.0, 2000.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    message_list(
+                        ui,
+                        "fold",
+                        messages,
+                        &mut MessageContext {
+                            emoji: &workspace.emoji,
+                            images: &mut images,
+                            self_user_id: "me",
+                            allow_threads: true,
+                            outbox: &Outbox::default(),
+                            new_after: None,
+                        },
+                    );
+                    height = ui.min_rect().height();
+                },
+            );
+            output.textures_delta.clear();
+            height
+        };
+        let expand = |ts: &str, expanded: bool| {
+            ctx.data_mut(|data| data.insert_temp(fold_id(ts), expanded));
+        };
+        let long = [message("1790000000", 60)];
+        let folded = height(&long);
+        expand("1790000000", true);
+        let expanded = height(&long);
+        assert!(folded < FOLD_THRESHOLD, "folded height {folded}");
+        assert!(expanded > folded + 400.0, "{expanded} vs {folded}");
+        expand("1790000000", false);
+        assert!((height(&long) - folded).abs() < 1.0);
+
+        let short = [message("1790000001", 3)];
+        let before = height(&short);
+        expand("1790000001", true);
+        assert!(
+            (height(&short) - before).abs() < 1.0,
+            "short messages never fold"
+        );
     }
 
     #[test]
