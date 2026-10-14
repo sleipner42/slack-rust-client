@@ -650,7 +650,10 @@ impl ChatApp {
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     if ui
-                        .add_enabled(!self.back.is_empty(), egui::Button::new("←").frame(false))
+                        .add_enabled(
+                            !self.back.is_empty(),
+                            egui::Button::new(BACK_ARROW).frame(false),
+                        )
                         .on_hover_text(format!("Back · {BACK_LABEL}"))
                         .clicked()
                     {
@@ -659,7 +662,7 @@ impl ChatApp {
                     if ui
                         .add_enabled(
                             !self.forward.is_empty(),
-                            egui::Button::new("→").frame(false),
+                            egui::Button::new(FORWARD_ARROW).frame(false),
                         )
                         .on_hover_text(format!("Forward · {FORWARD_LABEL}"))
                         .clicked()
@@ -1532,6 +1535,9 @@ fn push_history(stack: &mut Vec<Conversation>, conversation: Conversation) {
 }
 
 const HISTORY_LIMIT: usize = 50;
+// The bundled fonts have no "←"/"→" glyphs.
+const BACK_ARROW: &str = "‹";
+const FORWARD_ARROW: &str = "›";
 #[cfg(target_os = "macos")]
 const BACK_SHORTCUT: (egui::Modifiers, egui::Key) =
     (egui::Modifiers::COMMAND, egui::Key::OpenBracket);
@@ -1548,9 +1554,9 @@ const BACK_SHORTCUT: (egui::Modifiers, egui::Key) = (egui::Modifiers::ALT, egui:
 const FORWARD_SHORTCUT: (egui::Modifiers, egui::Key) =
     (egui::Modifiers::ALT, egui::Key::ArrowRight);
 #[cfg(not(target_os = "macos"))]
-const BACK_LABEL: &str = "Alt+←";
+const BACK_LABEL: &str = "Alt+Left";
 #[cfg(not(target_os = "macos"))]
-const FORWARD_LABEL: &str = "Alt+→";
+const FORWARD_LABEL: &str = "Alt+Right";
 #[cfg(target_os = "macos")]
 const SWITCHER_SHORTCUT: &str = "⌘P";
 #[cfg(not(target_os = "macos"))]
@@ -1885,6 +1891,28 @@ mod tests {
         assert!(shown("C2", Some("C2")));
         assert!(!shown("C3", None), "muted in the demo workspace");
         assert!(shown("D2", None));
+    }
+
+    #[test]
+    fn header_symbols_and_shortcut_labels_have_glyphs() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        ctx.run_ui(Default::default(), |_| {})
+            .textures_delta
+            .clear();
+        let font = egui::FontId::proportional(15.0);
+        for text in [
+            BACK_ARROW,
+            FORWARD_ARROW,
+            BACK_LABEL,
+            FORWARD_LABEL,
+            SWITCHER_SHORTCUT,
+        ] {
+            assert!(
+                ctx.fonts_mut(|fonts| fonts.has_glyphs(&font, text)),
+                "{text}"
+            );
+        }
     }
 
     #[test]
