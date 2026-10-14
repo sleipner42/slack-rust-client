@@ -23,6 +23,8 @@ pub struct MessageContext<'a> {
     pub self_user_id: &'a str,
     pub allow_threads: bool,
     pub outbox: &'a Outbox,
+    /// Read position when the conversation was opened; later messages are new.
+    pub new_after: Option<&'a str>,
 }
 
 #[derive(Clone, Default)]
@@ -50,7 +52,7 @@ pub(super) const QUICK_REACTIONS: [(&str, &str); 3] = [
     ("question", "Question mark"),
 ];
 
-type RowSignature = (u64, bool, bool, u8);
+type RowSignature = (u64, bool, bool, bool, u8);
 
 pub fn message_list(
     ui: &mut egui::Ui,
@@ -80,11 +82,17 @@ pub fn message_list(
         let time = local_time(&message.ts);
         let day = previous
             .is_none_or(|previous| local_time(&previous.ts).date_naive() != time.date_naive());
-        let compact = !day && previous.is_some_and(|previous| can_group(previous, message));
+        let new = context.new_after.is_some_and(|read| {
+            let read = ts_seconds(read);
+            ts_seconds(&message.ts) > read
+                && previous.is_none_or(|previous| ts_seconds(&previous.ts) <= read)
+        });
+        let compact = !day && !new && previous.is_some_and(|previous| can_group(previous, message));
         let signature = (
             message.layout_key,
             compact,
             day,
+            new,
             context
                 .outbox
                 .delivery(message)
@@ -104,6 +112,9 @@ pub fn message_list(
         let response = ui.push_id((id_salt, &message.ts), |ui| {
             if day {
                 day_separator(ui, &time);
+            }
+            if new {
+                new_separator(ui);
             }
             if let Some(row_action) =
                 message_row(ui, message, compact, &time, context, &mut toolbar_hover)
@@ -673,6 +684,24 @@ pub(super) fn attachment_view(
     open
 }
 
+fn new_separator(ui: &mut egui::Ui) {
+    ui.add_space(8.0);
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 16.0), egui::Sense::hover());
+    let galley = ui.painter().layout_no_wrap(
+        "New".into(),
+        egui::TextStyle::Small.resolve(ui.style()),
+        theme::UNREAD_DOT,
+    );
+    let text_rect = egui::Align2::RIGHT_CENTER.align_size_within_rect(galley.size(), rect);
+    ui.painter().hline(
+        rect.left()..=text_rect.left() - 8.0,
+        rect.center().y,
+        egui::Stroke::new(1.0, theme::UNREAD_DOT),
+    );
+    ui.put(text_rect, egui::Label::new(galley));
+}
+
 fn day_separator(ui: &mut egui::Ui, time: &DateTime<Local>) {
     ui.add_space(12.0);
     let today = Local::now().date_naive();
@@ -777,6 +806,7 @@ mod tests {
                                 self_user_id: "me",
                                 allow_threads,
                                 outbox: &outbox,
+                                new_after: None,
                             },
                         );
                         height = ui.min_rect().height();
@@ -975,6 +1005,7 @@ mod tests {
                                     self_user_id: "me",
                                     allow_threads: true,
                                     outbox: &Outbox::default(),
+                                    new_after: None,
                                 },
                             )
                         })
@@ -1033,6 +1064,7 @@ mod tests {
                                 self_user_id: "me",
                                 allow_threads: true,
                                 outbox: &Outbox::default(),
+                                new_after: None,
                             },
                         );
                     });

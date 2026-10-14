@@ -74,6 +74,8 @@ struct ChatApp {
     team_name: String,
     workspace: Option<Workspace>,
     selected: Option<Conversation>,
+    /// Read position of `selected` when it was opened, if it had unreads then.
+    new_after: Option<String>,
     messages: Vec<DisplayMessage>,
     history_cache: HashMap<ComposeTarget, (Instant, Vec<DisplayMessage>)>,
     unread_only: bool,
@@ -324,6 +326,7 @@ impl ChatApp {
             team_name,
             workspace: None,
             selected: None,
+            new_after: None,
             messages: Vec::new(),
             history_cache: HashMap::new(),
             unread_only: false,
@@ -695,6 +698,7 @@ impl ChatApp {
                                     self_user_id: &workspace.self_user_id,
                                     allow_threads: true,
                                     outbox: &self.outbox,
+                                    new_after: self.new_after.as_deref(),
                                 },
                             );
                             if self.scroll_after_send.remove(&target) {
@@ -864,6 +868,7 @@ impl ChatApp {
                                 self_user_id: &workspace.self_user_id,
                                 allow_threads: false,
                                 outbox: &self.outbox,
+                                new_after: None,
                             },
                         );
                         if self.scroll_after_send.remove(&target) {
@@ -984,6 +989,12 @@ impl ChatApp {
             thread_ts: None,
         });
         self.last_poll = Instant::now();
+        self.new_after = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.read_states.get(&conversation.id))
+            .filter(|state| state.has_unreads)
+            .and_then(|state| state.last_read_ts.clone());
         self.selected = Some(conversation);
     }
 
@@ -1679,6 +1690,33 @@ mod tests {
             assert!(ctx.memory(|memory| memory.has_focus(target("C1").editor_id())));
         }
         assert_eq!(app.drafts[&target("C1")].text, "existing draft!!");
+    }
+
+    fn conversation(app: &ChatApp, id: &str) -> Conversation {
+        app.workspace
+            .as_ref()
+            .unwrap()
+            .conversations
+            .iter()
+            .find(|c| c.id == id)
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn new_divider_marks_the_read_position_only_for_unread_conversations() {
+        let mut app = app();
+        app.select(conversation(&app, "C2"));
+        let read = app.workspace.as_ref().unwrap().read_states["C2"]
+            .last_read_ts
+            .clone();
+        assert!(read.is_some());
+        assert_eq!(app.new_after, read);
+        // Read conversations, and ones never read, get no divider.
+        app.select(conversation(&app, "D2"));
+        assert_eq!(app.new_after, None);
+        app.select(conversation(&app, "D1"));
+        assert_eq!(app.new_after, None);
     }
 
     #[test]
