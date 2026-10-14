@@ -82,6 +82,7 @@ struct ChatApp {
     activity_open: bool,
     activity: Option<Activity>,
     drafts: HashMap<ComposeTarget, Draft>,
+    paste_shortcut: crate::infrastructure::clipboard::PasteShortcut,
     composer_focus: Option<ComposeTarget>,
     outbox: Outbox,
     send_requests: Sender<SendRequest>,
@@ -126,6 +127,49 @@ enum UiEvent {
 }
 
 impl eframe::App for ChatApp {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        let shortcut = self.paste_shortcut.take();
+        let paste = input
+            .events
+            .iter()
+            .any(|event| matches!(event, egui::Event::Paste(_)));
+        if !(shortcut || paste)
+            || !input.focused
+            || self.switcher.is_some()
+            || self.picker.is_some()
+            || self.image_viewer.is_some()
+        {
+            return;
+        }
+        let target = self
+            .drafts
+            .keys()
+            .find(|target| ctx.memory(|memory| memory.has_focus(target.editor_id())))
+            .cloned();
+        let Some(target) = target else {
+            return;
+        };
+        match crate::infrastructure::clipboard::read_attachment() {
+            Ok(Some(content)) => {
+                input
+                    .events
+                    .retain(|event| !matches!(event, egui::Event::Paste(_)));
+                self.drafts
+                    .entry(target)
+                    .or_default()
+                    .attachments
+                    .paste(content, ctx);
+            }
+            Err(error) => {
+                input
+                    .events
+                    .retain(|event| !matches!(event, egui::Event::Paste(_)));
+                self.drafts.entry(target).or_default().attachments.error = Some(error.to_string());
+            }
+            Ok(None) => {} // egui handles ordinary text paste unchanged.
+        }
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
         if let Some(todos) = &mut self.todos {
@@ -247,13 +291,22 @@ impl ChatApp {
         let send_events = sender.clone();
         let send_ctx = ctx.clone();
         thread::spawn(move || {
-            while let Ok(request) = send_queue.recv() {
-                let result = send_service.send(
-                    &request.target.conversation_id,
-                    &request.text,
-                    request.target.thread_ts.as_deref(),
-                    &request.id,
-                );
+            while let Ok(mut request) = send_queue.recv() {
+                let result = if request.uploads.files.is_empty() {
+                    send_service.send(
+                        &request.target.conversation_id,
+                        &request.text,
+                        request.target.thread_ts.as_deref(),
+                        &request.id,
+                    )
+                } else {
+                    send_service.send_files(
+                        &request.target.conversation_id,
+                        &request.text,
+                        request.target.thread_ts.as_deref(),
+                        &mut request.uploads,
+                    )
+                };
                 if send_events
                     .send(UiEvent::MessageSent(request, result))
                     .is_err()
@@ -279,6 +332,7 @@ impl ChatApp {
             activity_open: false,
             activity: None,
             drafts: HashMap::new(),
+            paste_shortcut: Default::default(),
             composer_focus: None,
             outbox: Outbox::default(),
             send_requests,
@@ -846,16 +900,43 @@ impl ChatApp {
         }
         if composer(ui, target, draft, hint) {
             let text = std::mem::take(&mut draft.text);
-            self.queue_message(target.clone(), text);
+            let files = draft.attachments.take();
+            self.queue_message(target.clone(), text, files);
         }
     }
 
-    fn queue_message(&mut self, target: ComposeTarget, text: String) {
+    fn queue_message(
+        &mut self,
+        target: ComposeTarget,
+        text: String,
+        files: Vec<crate::domain::uploads::UploadFile>,
+    ) {
         let id = uuid::Uuid::new_v4().to_string();
-        let message = self
+        let mut message = self
             .service
             .outgoing_message(&text, target.thread_ts.as_deref(), &id);
-        let request = SendRequest { id, target, text };
+        message.attachments = files
+            .iter()
+            .map(|file| crate::domain::model::Attachment {
+                file_id: None,
+                name: file.name.clone(),
+                preview_url: None,
+                full_url: None,
+                permalink: None,
+                width: None,
+                height: None,
+                preview_pending: false,
+            })
+            .collect();
+        let request = SendRequest {
+            id,
+            target,
+            text,
+            uploads: crate::domain::uploads::UploadBatch {
+                files,
+                ..Default::default()
+            },
+        };
         self.outbox.insert(request.clone(), message);
         self.scroll_after_send.insert(request.target.clone());
         self.dispatch_send(request);
@@ -1116,6 +1197,7 @@ impl ChatApp {
                     }
                 }
                 UiEvent::MessageSent(request, result) => {
+                    self.outbox.update_uploads(&request);
                     self.outbox.finish(&request.id, result);
                     self.refresh_conversation(&request.target.conversation_id);
                 }
@@ -1196,7 +1278,7 @@ impl ChatApp {
 
     fn live_event(&mut self, status: LiveStatus) {
         let event = match status {
-            LiveStatus::Event(event) => event,
+            LiveStatus::Event(event) => *event,
             LiveStatus::Disconnected(error) => {
                 self.live_connected = false;
                 // Polling continues while the existing realtime source reconnects.

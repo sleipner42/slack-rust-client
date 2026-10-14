@@ -10,6 +10,7 @@ pub struct SendRequest {
     pub id: String,
     pub target: ComposeTarget,
     pub text: String,
+    pub uploads: crate::domain::uploads::UploadBatch,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -56,10 +57,30 @@ impl Outbox {
         };
         match result {
             Ok(ts) => {
-                item.message.ts = ts;
+                if !ts.is_empty() {
+                    item.message.ts = ts;
+                }
                 item.delivery = Delivery::Confirmed;
             }
             Err(error) => item.delivery = Delivery::Failed(error.to_string()),
+        }
+    }
+
+    pub fn update_uploads(&mut self, request: &SendRequest) {
+        if let Some(item) = self
+            .items
+            .iter_mut()
+            .find(|item| item.request.id == request.id)
+        {
+            item.request.uploads = request.uploads.clone();
+            for (attachment, id) in item
+                .message
+                .attachments
+                .iter_mut()
+                .zip(&request.uploads.uploaded_ids)
+            {
+                attachment.file_id = Some(id.clone());
+            }
         }
     }
 
@@ -121,6 +142,13 @@ impl Outgoing {
     fn matches(&self, message: &DisplayMessage) -> bool {
         message.client_msg_id.as_deref() == Some(&self.request.id)
             || (self.delivery == Delivery::Confirmed && message.ts == self.message.ts)
+            || (!self.request.uploads.uploaded_ids.is_empty()
+                && message.attachments.iter().any(|attachment| {
+                    attachment
+                        .file_id
+                        .as_ref()
+                        .is_some_and(|id| self.request.uploads.uploaded_ids.contains(id))
+                }))
     }
 }
 
@@ -130,6 +158,47 @@ mod tests {
     use crate::application::chat_service::ChatService;
     use crate::infrastructure::demo::DemoGateway;
     use std::sync::Arc;
+
+    #[test]
+    fn upload_echo_reconciles_by_file_id_without_a_client_message_id() {
+        let (mut request, mut message) = fixture("upload", Some("10.0"));
+        request
+            .uploads
+            .files
+            .push(crate::domain::uploads::UploadFile {
+                name: "notes.txt".into(),
+                bytes: Vec::from(b"notes").into(),
+            });
+        message.attachments.push(crate::domain::model::Attachment {
+            file_id: None,
+            name: "notes.txt".into(),
+            preview_url: None,
+            full_url: None,
+            permalink: None,
+            width: None,
+            height: None,
+            preview_pending: false,
+        });
+        let mut outbox = Outbox::default();
+        outbox.insert(request.clone(), message.clone());
+        request.uploads.uploaded_ids.push("F1".into());
+        request.uploads.completion_started = true;
+        outbox.update_uploads(&request);
+        outbox.finish(
+            &request.id,
+            Err(SlackError("confirmation interrupted".into())),
+        );
+        let retry = outbox.retry(&request.id).unwrap();
+        assert_eq!(retry.uploads.uploaded_ids, ["F1"]);
+        assert!(retry.uploads.completion_started);
+        let mut echo = message;
+        echo.ts = "50.0".into();
+        echo.client_msg_id = None;
+        echo.attachments[0].file_id = Some("F1".into());
+        assert_eq!(outbox.messages(&request.target, &[echo.clone()]).len(), 1);
+        outbox.reconcile(&request.target, &[echo]);
+        assert!(!outbox.has_messages(&request.target));
+    }
 
     fn fixture(id: &str, thread: Option<&str>) -> (SendRequest, DisplayMessage) {
         let service = ChatService::new(Arc::new(DemoGateway::new()));
@@ -141,6 +210,7 @@ mod tests {
                 thread_ts: thread.map(str::to_owned),
             },
             text: "The same text\non two lines".into(),
+            uploads: Default::default(),
         };
         let message = service.outgoing_message(&request.text, thread, id);
         (request, message)

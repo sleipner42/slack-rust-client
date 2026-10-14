@@ -360,7 +360,7 @@ impl ChatService {
 
     pub fn display(&self, message: &Message) -> DisplayMessage {
         let profile = match &message.author {
-            Author::User(id) => Some(self.profile(id)),
+            Author::User(id) | Author::Bot { id, .. } => Some(self.profile(id)),
             Author::Named(_) => None,
         };
         display_message(message, profile, self)
@@ -375,6 +375,35 @@ impl ChatService {
     ) -> Result<String, SlackError> {
         self.gateway
             .post_message(conversation_id, text, thread_ts, client_msg_id)
+    }
+
+    pub fn send_files(
+        &self,
+        conversation_id: &str,
+        text: &str,
+        thread_ts: Option<&str>,
+        batch: &mut crate::domain::uploads::UploadBatch,
+    ) -> Result<String, SlackError> {
+        if batch.completion_started {
+            // A timeout at finalization may already have posted the message. Never
+            // create another upload/message on retry; check the original file IDs.
+            return self.gateway.uploaded_message_ts(conversation_id, &batch.uploaded_ids)?
+                .ok_or_else(|| SlackError("Slack has not confirmed this upload yet. Check the conversation; Retry checks its status without posting again.".into()));
+        }
+        for file in &batch.files[batch.uploaded_ids.len()..] {
+            batch.uploaded_ids.push(self.gateway.upload_file(file)?);
+        }
+        batch.completion_started = true;
+        if let Err(error) = self
+            .gateway
+            .complete_uploads(conversation_id, batch, text, thread_ts)
+        {
+            batch.completion_started = error.may_have_posted;
+            return Err(error.error);
+        }
+        // The completion response contains file IDs, not a message timestamp.
+        // The outbox reconciles these IDs against the live/history echo.
+        Ok(String::new())
     }
 
     /// Build the immediate local row using cached names only: no UI-thread I/O.
@@ -475,7 +504,9 @@ impl ChatService {
             .iter()
             .map(|message| {
                 let profile = match &message.author {
-                    Author::User(id) => lock(&self.profiles).get(id).cloned(),
+                    Author::User(id) | Author::Bot { id, .. } => {
+                        lock(&self.profiles).get(id).cloned()
+                    }
                     Author::Named(_) => None,
                 };
                 display_message(message, profile, &CachedNames(self))
@@ -599,7 +630,7 @@ fn referenced_users(messages: &[Message]) -> Vec<String> {
     }
     let users = Users(Default::default());
     for message in messages {
-        if let Author::User(id) = &message.author {
+        if let Author::User(id) | Author::Bot { id, .. } = &message.author {
             users.0.borrow_mut().insert(id.clone());
         }
         parse_message_text(&message.text, &users);
@@ -614,6 +645,27 @@ fn display_message(
 ) -> DisplayMessage {
     let (author_key, author, avatar_url) = match (&message.author, profile) {
         (Author::Named(name), _) => (name.clone(), name.clone(), None),
+        (
+            Author::Bot {
+                id,
+                name,
+                avatar_url,
+            },
+            profile,
+        ) => (
+            id.clone(),
+            name.clone()
+                .or_else(|| {
+                    profile
+                        .as_ref()
+                        .filter(|p| p.name != *id)
+                        .map(|p| p.name.clone())
+                })
+                .unwrap_or_else(|| "Bot".into()),
+            avatar_url
+                .clone()
+                .or_else(|| profile.and_then(|p| p.avatar_url)),
+        ),
         (Author::User(id), profile) => (
             id.clone(),
             profile
@@ -680,6 +732,80 @@ mod tests {
     use crate::infrastructure::demo::DemoGateway;
     use std::sync::{Condvar, mpsc};
     use std::time::Duration;
+
+    fn upload_batch() -> crate::domain::uploads::UploadBatch {
+        crate::domain::uploads::UploadBatch {
+            files: ["first.png", "second.txt"]
+                .into_iter()
+                .map(|name| crate::domain::uploads::UploadFile {
+                    name: name.into(),
+                    bytes: Vec::from(b"fixture").into(),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn upload_retry_resumes_partial_batch_and_preserves_thread_and_caption() {
+        let gateway = Arc::new(DemoGateway::new());
+        *gateway.upload_failure.lock().unwrap() = Some("second.txt".into());
+        let service = ChatService::new(gateway.clone());
+        let mut batch = upload_batch();
+        assert!(
+            service
+                .send_files("D1", "caption\nsecond line", Some("10.0"), &mut batch)
+                .is_err()
+        );
+        assert_eq!(batch.uploaded_ids, ["F-first.png"]);
+        assert!(gateway.upload_completions.lock().unwrap().is_empty());
+        assert!(
+            service
+                .send_files("D1", "caption\nsecond line", Some("10.0"), &mut batch)
+                .is_ok()
+        );
+        assert_eq!(
+            *gateway.upload_attempts.lock().unwrap(),
+            ["first.png", "second.txt", "second.txt"]
+        );
+        let calls = gateway.upload_completions.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].channel, "D1");
+        assert_eq!(calls[0].thread.as_deref(), Some("10.0"));
+        assert_eq!(calls[0].text, "caption\nsecond line");
+        assert_eq!(calls[0].ids, ["F-first.png", "F-second.txt"]);
+    }
+
+    #[test]
+    fn ambiguous_upload_confirmation_checks_status_without_posting_twice() {
+        let gateway = Arc::new(DemoGateway::new());
+        *gateway.completion_failure.lock().unwrap() = Some(true);
+        let service = ChatService::new(gateway.clone());
+        let mut batch = upload_batch();
+        assert!(service.send_files("C1", "", None, &mut batch).is_err());
+        assert!(batch.completion_started);
+        assert!(service.send_files("C1", "", None, &mut batch).is_err());
+        *gateway.upload_confirmed_ts.lock().unwrap() = Some("20.0".into());
+        assert_eq!(
+            service.send_files("C1", "", None, &mut batch).unwrap(),
+            "20.0"
+        );
+        assert_eq!(gateway.upload_completions.lock().unwrap().len(), 1);
+        assert_eq!(gateway.upload_attempts.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn rejected_upload_can_retry_sharing_without_uploading_files_again() {
+        let gateway = Arc::new(DemoGateway::new());
+        *gateway.completion_failure.lock().unwrap() = Some(false);
+        let service = ChatService::new(gateway.clone());
+        let mut batch = upload_batch();
+        assert!(service.send_files("C1", "", None, &mut batch).is_err());
+        assert!(!batch.completion_started);
+        assert!(service.send_files("C1", "", None, &mut batch).is_ok());
+        assert_eq!(gateway.upload_completions.lock().unwrap().len(), 2);
+        assert_eq!(gateway.upload_attempts.lock().unwrap().len(), 2);
+    }
 
     struct SlowMetadata {
         gate: (Mutex<bool>, Condvar),

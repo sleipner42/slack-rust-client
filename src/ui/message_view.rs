@@ -237,7 +237,12 @@ fn message_row(
                     render_blocks(ui, &message.blocks, context.emoji, context.images);
                     match delivery {
                         Some(Delivery::Sending) => {
-                            ui.label(RichText::new("Sending…").small().weak());
+                            let label = if message.attachments.is_empty() {
+                                "Sending…"
+                            } else {
+                                "Uploading attachments…"
+                            };
+                            ui.label(RichText::new(label).small().weak());
                         }
                         Some(Delivery::Failed(error)) => {
                             ui.horizontal(|ui| {

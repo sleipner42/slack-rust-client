@@ -6,6 +6,30 @@ use crate::domain::model::{
 };
 
 pub trait SlackGateway: Send + Sync {
+    fn upload_file(&self, _file: &super::uploads::UploadFile) -> Result<String, SlackError> {
+        Err(SlackError(
+            "File uploads are unavailable for this workspace.".into(),
+        ))
+    }
+    fn complete_uploads(
+        &self,
+        _conversation_id: &str,
+        _batch: &super::uploads::UploadBatch,
+        _text: &str,
+        _thread_ts: Option<&str>,
+    ) -> Result<(), super::uploads::UploadCompletionError> {
+        Err(super::uploads::UploadCompletionError {
+            error: SlackError("File uploads are unavailable for this workspace.".into()),
+            may_have_posted: false,
+        })
+    }
+    fn uploaded_message_ts(
+        &self,
+        _conversation_id: &str,
+        _file_ids: &[String],
+    ) -> Result<Option<String>, SlackError> {
+        Ok(None)
+    }
     fn mark_activity_read(&self, _item: &super::activity::ActivityItem) -> Result<(), SlackError> {
         Err(SlackError(
             "Updating Activity is unavailable for this workspace.".into(),

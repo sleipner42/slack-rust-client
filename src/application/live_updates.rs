@@ -6,7 +6,7 @@ use crate::domain::gateway::RealtimeSource;
 use crate::domain::model::{LiveEvent, SlackError};
 
 pub enum LiveStatus {
-    Event(LiveEvent),
+    Event(Box<LiveEvent>),
     Disconnected(SlackError),
 }
 
@@ -20,7 +20,7 @@ pub fn spawn_live_updates(
             let mut connected = false;
             let result = source.listen(&mut |event| {
                 connected = true;
-                on_status(LiveStatus::Event(event));
+                on_status(LiveStatus::Event(Box::new(event)));
             });
             if connected {
                 backoff = INITIAL_BACKOFF;

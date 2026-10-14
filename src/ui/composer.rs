@@ -15,10 +15,12 @@ impl ComposeTarget {
 #[derive(Default)]
 pub struct Draft {
     pub text: String,
+    pub attachments: super::attachments::Attachments,
     ime_active: bool,
 }
 
 pub fn composer(ui: &mut egui::Ui, target: &ComposeTarget, draft: &mut Draft, hint: &str) -> bool {
+    draft.attachments.poll(ui.ctx());
     let id = target.editor_id();
     let focused = ui.is_enabled() && ui.memory(|memory| memory.has_focus(id));
     let enter = if focused {
@@ -51,10 +53,11 @@ pub fn composer(ui: &mut egui::Ui, target: &ComposeTarget, draft: &mut Draft, hi
                             )),
                     );
                 });
+            draft.attachments.show(ui);
             ui.add_space(8.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let response = ui.add_enabled(
-                    !draft.text.trim().is_empty(),
+                    can_send(draft),
                     egui::Button::new("Send").min_size(egui::vec2(56.0, 24.0)),
                 );
                 send = response.clicked();
@@ -70,11 +73,16 @@ pub fn composer(ui: &mut egui::Ui, target: &ComposeTarget, draft: &mut Draft, hi
                 });
             });
         });
-    let submitted = (enter || send) && !draft.text.trim().is_empty();
+    let submitted = (enter || send) && can_send(draft);
     if submitted {
         ui.memory_mut(|memory| memory.request_focus(id));
     }
     submitted
+}
+
+fn can_send(draft: &Draft) -> bool {
+    !draft.attachments.is_preparing()
+        && (!draft.text.trim().is_empty() || !draft.attachments.is_empty())
 }
 
 // Only plain Enter submits. IME confirmation and key-repeat must never send a message.

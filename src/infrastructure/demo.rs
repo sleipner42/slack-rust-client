@@ -9,8 +9,20 @@ use crate::domain::unread::record_read;
 
 pub struct DemoGateway {
     pub activity_reads: Mutex<Vec<crate::domain::activity::ActivityItem>>,
+    pub upload_attempts: Mutex<Vec<String>>,
+    pub upload_failure: Mutex<Option<String>>,
+    pub upload_completions: Mutex<Vec<TestUploadCompletion>>,
+    pub completion_failure: Mutex<Option<bool>>,
+    pub upload_confirmed_ts: Mutex<Option<String>>,
     messages: Mutex<HashMap<String, Vec<Message>>>,
     states: Mutex<HashMap<String, ReadState>>,
+}
+
+pub struct TestUploadCompletion {
+    pub channel: String,
+    pub ids: Vec<String>,
+    pub text: String,
+    pub thread: Option<String>,
 }
 
 impl DemoGateway {
@@ -168,6 +180,11 @@ impl DemoGateway {
             ),
         ]);
         Self {
+            upload_attempts: Default::default(),
+            upload_failure: Default::default(),
+            upload_completions: Default::default(),
+            completion_failure: Default::default(),
+            upload_confirmed_ts: Default::default(),
             activity_reads: Mutex::new(Vec::new()),
             messages: Mutex::new(messages),
             states: Mutex::new(states),
@@ -176,6 +193,44 @@ impl DemoGateway {
 }
 
 impl SlackGateway for DemoGateway {
+    fn upload_file(&self, file: &crate::domain::uploads::UploadFile) -> Result<String, SlackError> {
+        self.upload_attempts.lock().unwrap().push(file.name.clone());
+        let mut failure = self.upload_failure.lock().unwrap();
+        if failure.as_ref() == Some(&file.name) {
+            *failure = None;
+            return Err(SlackError("Upload interrupted".into()));
+        }
+        Ok(format!("F-{}", file.name))
+    }
+
+    fn complete_uploads(
+        &self,
+        channel: &str,
+        batch: &crate::domain::uploads::UploadBatch,
+        text: &str,
+        thread: Option<&str>,
+    ) -> Result<(), crate::domain::uploads::UploadCompletionError> {
+        self.upload_completions
+            .lock()
+            .unwrap()
+            .push(TestUploadCompletion {
+                channel: channel.into(),
+                ids: batch.uploaded_ids.clone(),
+                text: text.into(),
+                thread: thread.map(str::to_owned),
+            });
+        if let Some(may_have_posted) = self.completion_failure.lock().unwrap().take() {
+            return Err(crate::domain::uploads::UploadCompletionError {
+                error: SlackError("Completion failed".into()),
+                may_have_posted,
+            });
+        }
+        Ok(())
+    }
+
+    fn uploaded_message_ts(&self, _: &str, _: &[String]) -> Result<Option<String>, SlackError> {
+        Ok(self.upload_confirmed_ts.lock().unwrap().clone())
+    }
     fn mark_activity_read(
         &self,
         item: &crate::domain::activity::ActivityItem,

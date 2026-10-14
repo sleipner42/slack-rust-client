@@ -57,6 +57,11 @@ pub struct ReadState {
 pub enum Author {
     User(String),
     Named(String),
+    Bot {
+        id: String,
+        name: Option<String>,
+        avatar_url: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

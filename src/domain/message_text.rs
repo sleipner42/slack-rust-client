@@ -333,6 +333,15 @@ fn parse_token(token: &str, names: &dyn NameLookup) -> Inline {
             is_self: BROADCAST_NAMES.contains(&special),
         };
     }
+    if !["https://", "http://", "mailto:", "slack://", "tel:"]
+        .iter()
+        .any(|scheme| target.starts_with(scheme))
+    {
+        return Inline::Text {
+            text: format!("<{}>", unescape(token)),
+            style: TextStyle::default(),
+        };
+    }
     Inline::Link {
         label: unescape(label.unwrap_or(target.strip_prefix(MAILTO).unwrap_or(target))),
         url: unescape(target),
@@ -501,6 +510,13 @@ mod tests {
                 Block::Paragraph(vec![text("after")]),
             ]
         );
+    }
+
+    #[test]
+    fn traceback_omission_markers_are_literal_text_not_links() {
+        let blocks = parse_message_text("Traceback ...<4 lines>... end", &Names);
+        assert_eq!(plain_text(&blocks), "Traceback ...<4 lines>... end");
+        assert!(!blocks.iter().any(|block| matches!(block, Block::Paragraph(inlines) if inlines.iter().any(|inline| matches!(inline, Inline::Link { .. })))));
     }
 
     #[test]

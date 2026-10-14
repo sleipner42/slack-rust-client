@@ -312,6 +312,26 @@ fn group_display_name(raw_name: &str) -> String {
 }
 
 fn parse_author(item: &Value) -> Author {
+    if let Some(id) = item["bot_id"]
+        .as_str()
+        .or(item["bot_profile"]["id"].as_str())
+    {
+        return Author::Bot {
+            id: id.into(),
+            name: item["bot_profile"]["name"]
+                .as_str()
+                .or(item["username"].as_str())
+                .map(str::to_owned),
+            avatar_url: ["image_72", "image_48", "image_36"]
+                .iter()
+                .find_map(|key| {
+                    item["bot_profile"]["icons"][key]
+                        .as_str()
+                        .or(item["icons"][key].as_str())
+                })
+                .map(str::to_owned),
+        };
+    }
     if let Some(name) = item["bot_profile"]["name"]
         .as_str()
         .or(item["username"].as_str())
@@ -326,24 +346,7 @@ fn parse_author(item: &Value) -> Author {
 }
 
 fn message_text(item: &Value) -> String {
-    let text = item["text"].as_str().unwrap_or("");
-    if !text.is_empty() {
-        return text.to_string();
-    }
-    item["attachments"]
-        .as_array()
-        .map(|attachments| {
-            attachments
-                .iter()
-                .filter_map(|attachment| {
-                    attachment["text"]
-                        .as_str()
-                        .or(attachment["fallback"].as_str())
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default()
+    super::block_text::message_text(item)
 }
 
 fn parse_reactions(raw: &Value) -> Vec<Reaction> {

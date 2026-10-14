@@ -24,10 +24,13 @@ existing workspace session for live checks; no demo mode.
   conversations and avoiding duplicates with the active conversation.
 - [ ] Edit your own messages, with clear pending and failure states.
 - [ ] Delete your own messages, with confirmation and failure recovery.
-- [ ] Upload files from the composer, with progress, cancellation, and retry.
+- [ ] Add byte-level upload progress, cancellation during upload, and a file chooser.
 
 ## Implemented
 
+- [x] Paste images/screenshots and files copied in Finder into channel/thread
+  drafts; thumbnails, filenames, removal, attachment-only sends, background
+  uploads, and retries that preserve successful uploads and check ambiguous sends.
 - [x] Slack Activity feed with DMs, mentions, threads and reactions; server unread
   filtering, cached previews, pagination, right-hand detail, and marking items read
   when opened, with retries if Slack rejects the update.
@@ -35,6 +38,8 @@ existing workspace session for live checks; no demo mode.
   ad-hoc signature and checksum. Developer ID notarization remains a release step.
 
 - [x] Message formatting, quotes, code, emoji, and mentions.
+- [x] Structured Slack message blocks and legacy attachments retain headings,
+  code fences, indentation, and bot names/avatars instead of notification fallbacks.
 - [x] Wrapped URLs share one hover highlight, tooltip and keyboard focus target;
   clicking any wrapped line opens the complete URL.
 - [x] Message grouping, avatars, day separators, and timestamps.
@@ -63,5 +68,5 @@ existing workspace session for live checks; no demo mode.
 - [x] Regression tests for channel-entry scrolling, resize layout, sidebar bounds,
   stale requests, drafts, unread state, and cached conversation switching.
 
-Validation baseline: 54 tests pass; formatting and Clippy are clean. Performance
+Validation baseline: 68 tests pass; formatting and Clippy are clean. Performance
 tests cover layout work, not live frame rate or measured energy consumption.

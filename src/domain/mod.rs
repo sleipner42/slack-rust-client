@@ -5,3 +5,4 @@ pub mod model;
 pub mod search;
 pub mod sidebar;
 pub mod unread;
+pub mod uploads;

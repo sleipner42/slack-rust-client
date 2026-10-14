@@ -1,4 +1,6 @@
 mod activity_parsing;
+mod block_text;
+pub mod clipboard;
 pub mod credential_store;
 #[cfg(test)]
 pub mod demo;

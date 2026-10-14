@@ -1,5 +1,6 @@
 mod activity;
 pub mod app;
+mod attachments;
 mod composer;
 mod dock;
 mod emoji_picker;

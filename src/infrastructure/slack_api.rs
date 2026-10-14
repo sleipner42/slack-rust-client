@@ -191,6 +191,135 @@ impl SlackHttpGateway {
 }
 
 impl SlackGateway for SlackHttpGateway {
+    fn upload_file(&self, file: &crate::domain::uploads::UploadFile) -> Result<String, SlackError> {
+        let length = file.bytes.len().to_string();
+        let body = self.call(
+            "files.getUploadURLExternal",
+            &[("filename", &file.name), ("length", &length)],
+        )?;
+        let id = body["file_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| SlackError("Slack returned no upload ID.".into()))?;
+        let url = body["upload_url"]
+            .as_str()
+            .ok_or_else(|| SlackError("Slack returned no upload URL.".into()))?;
+        if !valid_upload_url(url) {
+            return Err(SlackError(
+                "Slack returned an invalid upload destination.".into(),
+            ));
+        }
+        // The signed upload URL needs no workspace cookie/token. Do not send
+        // credentials or follow redirects, and keep large uploads off the UI thread.
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| SlackError("Could not create the upload connection.".into()))?;
+        let response = client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(reqwest::blocking::Body::sized(
+                std::io::Cursor::new(file.bytes.clone()),
+                file.bytes.len() as u64,
+            ))
+            .send()
+            .map_err(|_| {
+                SlackError(format!(
+                    "Could not upload {}. Check your connection and retry.",
+                    file.name
+                ))
+            })?;
+        if !response.status().is_success() {
+            return Err(SlackError(format!(
+                "Upload of {} failed ({}).",
+                file.name,
+                response.status()
+            )));
+        }
+        Ok(id.to_owned())
+    }
+
+    fn complete_uploads(
+        &self,
+        conversation_id: &str,
+        batch: &crate::domain::uploads::UploadBatch,
+        text: &str,
+        thread_ts: Option<&str>,
+    ) -> Result<(), crate::domain::uploads::UploadCompletionError> {
+        use crate::domain::uploads::UploadCompletionError;
+        let files = upload_descriptors(batch).to_string();
+        let mut params = vec![
+            ("files", files.as_str()),
+            ("token", self.credentials.token.as_str()),
+            ("channel_id", conversation_id),
+            ("initial_comment", text),
+        ];
+        if let Some(ts) = thread_ts {
+            params.push(("thread_ts", ts));
+        }
+        let response = self
+            .authenticated(self.client.post(format!(
+                "{}api/files.completeUploadExternal",
+                self.credentials.workspace_url
+            )))
+            .form(&params)
+            .send()
+            .map_err(|_| UploadCompletionError {
+                error: SlackError(
+                    "Upload confirmation was interrupted. Retry checks whether Slack received it."
+                        .into(),
+                ),
+                may_have_posted: true,
+            })?;
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            return Err(UploadCompletionError {
+                error: SlackError(
+                    "Slack is rate limiting uploads. Wait a moment and retry.".into(),
+                ),
+                may_have_posted: false,
+            });
+        }
+        let body: Value = response.json().map_err(|_| UploadCompletionError {
+            error: SlackError(
+                "Slack returned an unreadable upload confirmation. Retry checks its status.".into(),
+            ),
+            may_have_posted: true,
+        })?;
+        if body["ok"].as_bool() == Some(true) {
+            return Ok(());
+        }
+        let code = body["error"].as_str().unwrap_or("unknown_error");
+        Err(UploadCompletionError {
+            error: SlackError(format!("Could not share attachments: {code}")),
+            may_have_posted: matches!(
+                code,
+                "internal_error"
+                    | "fatal_error"
+                    | "request_timeout"
+                    | "service_unavailable"
+                    | "unknown_error"
+                    | "already_complete"
+            ),
+        })
+    }
+
+    fn uploaded_message_ts(
+        &self,
+        conversation_id: &str,
+        file_ids: &[String],
+    ) -> Result<Option<String>, SlackError> {
+        let mut timestamp = None;
+        for id in file_ids {
+            let body = self.call("files.info", &[("file", id)])?;
+            let Some(ts) = uploaded_share_ts(&body["file"], conversation_id) else {
+                return Ok(None);
+            };
+            timestamp = Some(ts);
+        }
+        Ok(timestamp)
+    }
     fn mark_activity_read(
         &self,
         item: &crate::domain::activity::ActivityItem,
@@ -482,6 +611,9 @@ impl SlackGateway for SlackHttpGateway {
     }
 
     fn user_profile(&self, user_id: &str) -> Result<UserProfile, SlackError> {
+        if user_id.starts_with('B') {
+            return self.bot_profile(user_id);
+        }
         let body = self.call("users.info", &[("user", user_id)])?;
         Ok(parse_user_profile(&body["user"], user_id))
     }
@@ -528,15 +660,20 @@ impl SlackGateway for SlackHttpGateway {
         } else {
             "reactions.remove"
         };
-        self.call(
-            method,
-            &[
-                ("channel", conversation_id),
-                ("timestamp", ts),
-                ("name", name),
-            ],
-        )
-        .map(|_| ())
+        let result = self
+            .call(
+                method,
+                &[
+                    ("channel", conversation_id),
+                    ("timestamp", ts),
+                    ("name", name),
+                ],
+            )
+            .map(|_| ());
+        match result {
+            Err(error) if reaction_already_applied(&error, add) => Ok(()),
+            result => result,
+        }
     }
 
     fn download(&self, url: &str) -> Result<Vec<u8>, SlackError> {
@@ -560,6 +697,45 @@ impl SlackGateway for SlackHttpGateway {
             .map(|bytes| bytes.to_vec())
             .map_err(|error| SlackError(error.to_string()))
     }
+}
+
+fn valid_upload_url(url: &str) -> bool {
+    reqwest::Url::parse(url).ok().is_some_and(|url| {
+        url.scheme() == "https"
+            && url.host_str() == Some("files.slack.com")
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.port_or_known_default() == Some(443)
+    })
+}
+
+fn reaction_already_applied(error: &SlackError, add: bool) -> bool {
+    error.0
+        == if add {
+            "reactions.add failed: already_reacted"
+        } else {
+            "reactions.remove failed: no_reaction"
+        }
+}
+
+fn upload_descriptors(batch: &crate::domain::uploads::UploadBatch) -> Value {
+    Value::Array(
+        batch
+            .uploaded_ids
+            .iter()
+            .zip(&batch.files)
+            .map(|(id, file)| serde_json::json!({"id": id, "title": file.name}))
+            .collect(),
+    )
+}
+
+fn uploaded_share_ts(file: &Value, conversation_id: &str) -> Option<String> {
+    ["public", "private"].iter().find_map(|kind| {
+        file["shares"][kind][conversation_id]
+            .as_array()?
+            .iter()
+            .find_map(|share| share["ts"].as_str().map(str::to_owned))
+    })
 }
 
 fn retry_delay(response: &reqwest::blocking::Response) -> Duration {
@@ -590,3 +766,54 @@ const REPLIES_LIMIT: &str = "200";
 const MAX_ATTEMPTS: usize = 4;
 const DEFAULT_RETRY_SECONDS: u64 = 2;
 const SLACK_HOST_SUFFIXES: [&str; 2] = [".slack.com", ".slack-edge.com"];
+
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+
+    #[test]
+    fn reaction_replays_are_successful_but_real_errors_are_not_hidden() {
+        assert!(reaction_already_applied(
+            &SlackError("reactions.add failed: already_reacted".into()),
+            true
+        ));
+        assert!(reaction_already_applied(
+            &SlackError("reactions.remove failed: no_reaction".into()),
+            false
+        ));
+        assert!(!reaction_already_applied(
+            &SlackError("reactions.add failed: no_permission".into()),
+            true
+        ));
+        assert!(!reaction_already_applied(
+            &SlackError("reactions.add failed: already_reacted".into()),
+            false
+        ));
+    }
+
+    #[test]
+    fn signed_upload_destinations_must_stay_on_slack_https() {
+        assert!(valid_upload_url(
+            "https://files.slack.com/upload/v1/example"
+        ));
+        for url in [
+            "http://files.slack.com/upload",
+            "https://files.slack.com.attacker.test/upload",
+            "https://attacker.test/upload",
+            "https://user@files.slack.com/upload",
+            "file:///tmp/upload",
+        ] {
+            assert!(!valid_upload_url(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn confirmation_uses_the_target_conversation_not_an_unrelated_share() {
+        let file = serde_json::json!({"shares": {
+            "public": {"COTHER": [{"ts":"1.0"}]},
+            "private": {"DTARGET": [{"ts":"2.0", "thread_ts":"0.5"}]}
+        }});
+        assert_eq!(uploaded_share_ts(&file, "DTARGET").as_deref(), Some("2.0"));
+        assert_eq!(uploaded_share_ts(&file, "CMISSING"), None);
+    }
+}

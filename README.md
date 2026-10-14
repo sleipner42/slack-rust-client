@@ -8,6 +8,8 @@ Metal rendering. Inspired by old IRC clients: readable, restrained, and fast.
 - Slack to-dos with a detail panel and completion controls.
 - Cmd+P to switch conversations; Enter to send, Shift+Enter for a new line.
 - Local caching and immediate outgoing messages.
+- Cmd+V to attach images or files copied in Finder, in channels and threads.
+  Preview/remove attachments before sending (up to 10 files, 100 MB total).
 
 ## Run
 
@@ -32,5 +34,5 @@ bash scripts/package-dmg.sh    # target/dist/
 ```
 
 The current DMG build targets Apple Silicon and is ad-hoc signed, not notarized.
-Drafts are kept only while the app is open; older channel pagination and file
-uploads are planned. See [TODO.md](TODO.md) and [third-party notices](THIRD_PARTY.md).
+Drafts are kept only while the app is open; older channel pagination is planned.
+See [TODO.md](TODO.md) and [third-party notices](THIRD_PARTY.md).
