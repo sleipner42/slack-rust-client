@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use aes::cipher::block_padding::Pkcs7;
 use aes::cipher::{BlockDecryptMut, KeyIvInit};
@@ -95,7 +94,7 @@ fn read_session_cookie(slack_data_dir: &Path, scratch_dir: &Path) -> Result<Stri
     let encrypted: Vec<u8> = connection
         .query_row(SESSION_COOKIE_QUERY, [], |row| row.get(0))
         .map_err(|_| SlackError(String::from("Slack session cookie not found")))?;
-    let plaintext = decrypt_cookie(&encrypted, &read_safe_storage_password()?)?;
+    let plaintext = decrypt_cookie(&encrypted)?;
     let value = if schema_version >= HASHED_DOMAIN_SCHEMA_VERSION {
         plaintext
             .get(DOMAIN_HASH_LENGTH..)
@@ -107,30 +106,142 @@ fn read_session_cookie(slack_data_dir: &Path, scratch_dir: &Path) -> Result<Stri
     String::from_utf8(value).map_err(|_| SlackError(String::from("cookie is not valid UTF-8")))
 }
 
-fn decrypt_cookie(encrypted: &[u8], password: &str) -> Result<Vec<u8>, SlackError> {
-    let ciphertext = encrypted
-        .strip_prefix(ENCRYPTION_PREFIX)
+fn decrypt_cookie(encrypted: &[u8]) -> Result<Vec<u8>, SlackError> {
+    let (prefix, ciphertext) = encrypted
+        .split_at_checked(ENCRYPTION_PREFIX_LENGTH)
         .ok_or_else(|| SlackError(String::from("unsupported cookie encryption")))?;
+    let passwords = safe_storage::passwords(prefix)?;
+    passwords
+        .iter()
+        .find_map(|password| decrypt_with_password(ciphertext, password))
+        .ok_or_else(|| SlackError(String::from("cookie decryption failed")))
+}
+
+fn decrypt_with_password(ciphertext: &[u8], password: &[u8]) -> Option<Vec<u8>> {
     let mut key = [0u8; KEY_LENGTH];
-    pbkdf2::pbkdf2_hmac::<sha1::Sha1>(password.as_bytes(), KEY_SALT, KEY_ITERATIONS, &mut key);
+    pbkdf2::pbkdf2_hmac::<sha1::Sha1>(password, KEY_SALT, safe_storage::KEY_ITERATIONS, &mut key);
     let mut buffer = ciphertext.to_vec();
     let plaintext = Aes128CbcDecryptor::new(&key.into(), &INITIALIZATION_VECTOR.into())
         .decrypt_padded_mut::<Pkcs7>(&mut buffer)
-        .map_err(|_| SlackError(String::from("cookie decryption failed")))?;
-    Ok(plaintext.to_vec())
+        .ok()?;
+    Some(plaintext.to_vec())
 }
 
-fn read_safe_storage_password() -> Result<String, SlackError> {
-    let output = Command::new(SECURITY_TOOL)
-        .args(["find-generic-password", "-w", "-s", SAFE_STORAGE_SERVICE])
-        .output()
-        .map_err(|error| SlackError(error.to_string()))?;
-    if !output.status.success() {
-        return Err(SlackError(String::from(
-            "Keychain access to Slack Safe Storage was denied",
-        )));
+#[cfg(target_os = "macos")]
+mod safe_storage {
+    use std::process::Command;
+
+    use crate::domain::model::SlackError;
+
+    pub const KEY_ITERATIONS: u32 = 1003;
+
+    pub fn passwords(prefix: &[u8]) -> Result<Vec<Vec<u8>>, SlackError> {
+        if prefix != b"v10" {
+            return Err(SlackError(String::from("unsupported cookie encryption")));
+        }
+        let output = Command::new(SECURITY_TOOL)
+            .args(["find-generic-password", "-w", "-s", SAFE_STORAGE_SERVICE])
+            .output()
+            .map_err(|error| SlackError(error.to_string()))?;
+        if !output.status.success() {
+            return Err(SlackError(String::from(
+                "Keychain access to Slack Safe Storage was denied",
+            )));
+        }
+        let password = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(vec![password.into_bytes()])
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+
+    const SECURITY_TOOL: &str = "security";
+    const SAFE_STORAGE_SERVICE: &str = "Slack Safe Storage";
+}
+
+// Chromium on Linux encrypts with a fixed key ("v10") when no keyring is
+// available, and with a key from the Secret Service otherwise ("v11").
+#[cfg(target_os = "linux")]
+mod safe_storage {
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    use dbus::Path;
+    use dbus::arg::{RefArg, Variant};
+    use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
+    use dbus::blocking::{Connection, Proxy};
+
+    use crate::domain::model::SlackError;
+
+    pub const KEY_ITERATIONS: u32 = 1;
+
+    pub fn passwords(prefix: &[u8]) -> Result<Vec<Vec<u8>>, SlackError> {
+        match prefix {
+            b"v10" => Ok(vec![FIXED_PASSWORD.to_vec()]),
+            // Chromium falls back to an empty key when the keyring returns nothing.
+            b"v11" => Ok(vec![keyring_password()?, Vec::new()]),
+            _ => Err(SlackError(String::from("unsupported cookie encryption"))),
+        }
+    }
+
+    fn keyring_password() -> Result<Vec<u8>, SlackError> {
+        let to_error =
+            |error: dbus::Error| SlackError(format!("cannot read Slack Safe Storage: {error}"));
+        let connection = Connection::new_session().map_err(to_error)?;
+        let service = connection.with_proxy(SECRETS_BUS, SECRETS_PATH, TIMEOUT);
+        let (_, session): (Variant<Box<dyn RefArg>>, Path) = service
+            .method_call(
+                SERVICE_INTERFACE,
+                "OpenSession",
+                ("plain", Variant(Box::new(String::new()) as Box<dyn RefArg>)),
+            )
+            .map_err(to_error)?;
+        let mut unlocked = Vec::new();
+        let mut locked = Vec::new();
+        for schema in SCHEMAS {
+            let attributes = HashMap::from([("xdg:schema", schema)]);
+            let (found, found_locked): (Vec<Path>, Vec<Path>) = service
+                .method_call(SERVICE_INTERFACE, "SearchItems", (attributes,))
+                .map_err(to_error)?;
+            unlocked.extend(found);
+            locked.extend(found_locked);
+        }
+        let item = unlocked
+            .into_iter()
+            .find(|item| is_slack_item(&connection.with_proxy(SECRETS_BUS, item, TIMEOUT)))
+            .ok_or_else(|| {
+                SlackError(String::from(if locked.is_empty() {
+                    "Slack Safe Storage not found in keyring"
+                } else {
+                    "keyring is locked"
+                }))
+            })?;
+        let (secret,): ((Path, Vec<u8>, Vec<u8>, String),) = connection
+            .with_proxy(SECRETS_BUS, &item, TIMEOUT)
+            .method_call(ITEM_INTERFACE, "GetSecret", (session,))
+            .map_err(to_error)?;
+        Ok(secret.2)
+    }
+
+    fn is_slack_item(item: &Proxy<'_, &Connection>) -> bool {
+        let label: String = item.get(ITEM_INTERFACE, "Label").unwrap_or_default();
+        let attributes: HashMap<String, String> =
+            item.get(ITEM_INTERFACE, "Attributes").unwrap_or_default();
+        label == SAFE_STORAGE_LABEL
+            || attributes
+                .get("application")
+                .is_some_and(|application| application.eq_ignore_ascii_case(APPLICATION))
+    }
+
+    const FIXED_PASSWORD: &[u8] = b"peanuts";
+    const SECRETS_BUS: &str = "org.freedesktop.secrets";
+    const SECRETS_PATH: &str = "/org/freedesktop/secrets";
+    const SERVICE_INTERFACE: &str = "org.freedesktop.Secret.Service";
+    const ITEM_INTERFACE: &str = "org.freedesktop.Secret.Item";
+    const SCHEMAS: [&str; 2] = [
+        "chrome_libsecret_os_crypt_password_v2",
+        "chrome_libsecret_os_crypt_password_v1",
+    ];
+    const SAFE_STORAGE_LABEL: &str = "Slack Safe Storage";
+    const APPLICATION: &str = "slack";
+    const TIMEOUT: Duration = Duration::from_secs(5);
 }
 
 fn copy_dir_without_lock(source: &Path, target: &PathBuf) -> Result<(), SlackError> {
@@ -163,10 +274,57 @@ const META_VERSION_QUERY: &str = "SELECT value FROM meta WHERE key = 'version'";
 const SESSION_COOKIE_QUERY: &str = "SELECT encrypted_value FROM cookies WHERE name = 'd' AND host_key LIKE '%slack.com' ORDER BY length(host_key) LIMIT 1";
 const HASHED_DOMAIN_SCHEMA_VERSION: i64 = 24;
 const DOMAIN_HASH_LENGTH: usize = 32;
-const ENCRYPTION_PREFIX: &[u8] = b"v10";
+const ENCRYPTION_PREFIX_LENGTH: usize = 3;
 const KEY_LENGTH: usize = 16;
 const KEY_SALT: &[u8] = b"saltysalt";
-const KEY_ITERATIONS: u32 = 1003;
 const INITIALIZATION_VECTOR: [u8; 16] = [b' '; 16];
-const SECURITY_TOOL: &str = "security";
-const SAFE_STORAGE_SERVICE: &str = "Slack Safe Storage";
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use aes::cipher::BlockEncryptMut;
+
+    use super::*;
+
+    fn encrypt(prefix: &[u8], password: &[u8], plaintext: &[u8]) -> Vec<u8> {
+        let mut key = [0u8; KEY_LENGTH];
+        pbkdf2::pbkdf2_hmac::<sha1::Sha1>(
+            password,
+            KEY_SALT,
+            safe_storage::KEY_ITERATIONS,
+            &mut key,
+        );
+        let mut buffer = plaintext.to_vec();
+        buffer.resize(plaintext.len() + 16, 0);
+        let ciphertext =
+            cbc::Encryptor::<aes::Aes128>::new(&key.into(), &INITIALIZATION_VECTOR.into())
+                .encrypt_padded_mut::<Pkcs7>(&mut buffer, plaintext.len())
+                .unwrap();
+        [prefix, ciphertext].concat()
+    }
+
+    #[test]
+    fn decrypts_cookie_encrypted_without_keyring() {
+        let encrypted = encrypt(b"v10", b"peanuts", b"xoxd-session");
+        assert_eq!(decrypt_cookie(&encrypted).unwrap(), b"xoxd-session");
+    }
+
+    #[test]
+    fn decryption_requires_matching_password() {
+        let encrypted = encrypt(b"v10", b"peanuts", b"xoxd-session");
+        let (_, ciphertext) = encrypted.split_at(ENCRYPTION_PREFIX_LENGTH);
+        assert_eq!(
+            decrypt_with_password(ciphertext, b"peanuts").unwrap(),
+            b"xoxd-session"
+        );
+        assert_ne!(
+            decrypt_with_password(ciphertext, b"wrong").as_deref(),
+            Some(&b"xoxd-session"[..])
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_encryption() {
+        assert!(decrypt_cookie(b"v99abc").is_err());
+        assert!(decrypt_cookie(b"v1").is_err());
+    }
+}

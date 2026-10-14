@@ -326,7 +326,7 @@ impl ChatApp {
                 egui::Button::new((
                     "Jump to…",
                     egui::Atom::grow(),
-                    egui::RichText::new("⌘P").weak(),
+                    egui::RichText::new(SWITCHER_SHORTCUT).weak(),
                 )),
             )
             .clicked()
@@ -362,7 +362,7 @@ impl ChatApp {
                     ),
                 ),
             )
-            .on_hover_text("Show unread conversations · ⌘⇧U")
+            .on_hover_text(format!("Show unread conversations · {UNREAD_SHORTCUT}"))
             .clicked()
         {
             self.unread_only = !self.unread_only;
@@ -553,9 +553,9 @@ impl ChatApp {
                 ui.add_space(90.0);
                 ui.heading(&self.team_name);
                 ui.label(if self.workspace_loading {
-                    "Loading conversations…"
+                    String::from("Loading conversations…")
                 } else {
-                    "Choose a conversation or press ⌘P to jump in."
+                    format!("Choose a conversation or press {SWITCHER_SHORTCUT} to jump in.")
                 });
                 if let Some(status) = &self.status {
                     ui.colored_label(theme::SELF_MENTION_TEXT, status);
@@ -1344,6 +1344,14 @@ impl ChatApp {
     }
 }
 
+#[cfg(target_os = "macos")]
+const SWITCHER_SHORTCUT: &str = "⌘P";
+#[cfg(not(target_os = "macos"))]
+const SWITCHER_SHORTCUT: &str = "Ctrl+P";
+#[cfg(target_os = "macos")]
+const UNREAD_SHORTCUT: &str = "⌘⇧U";
+#[cfg(not(target_os = "macos"))]
+const UNREAD_SHORTCUT: &str = "Ctrl+Shift+U";
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 const COUNTS_INTERVAL: Duration = Duration::from_secs(30);
 

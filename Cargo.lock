@@ -493,6 +493,7 @@ dependencies = [
  "aes",
  "cbc",
  "chrono",
+ "dbus",
  "dirs",
  "eframe",
  "egui_extras",
