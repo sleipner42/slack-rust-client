@@ -76,6 +76,8 @@ struct ChatApp {
     selected: Option<Conversation>,
     /// Read position of `selected` when it was opened, if it had unreads then.
     new_after: Option<String>,
+    back: Vec<Conversation>,
+    forward: Vec<Conversation>,
     messages: Vec<DisplayMessage>,
     history_cache: HashMap<ComposeTarget, (Instant, Vec<DisplayMessage>)>,
     unread_only: bool,
@@ -201,6 +203,7 @@ impl eframe::App for ChatApp {
         }) {
             self.unread_only = !self.unread_only;
         }
+        self.history_navigation(ui.ctx());
         self.quick_switcher(ui.ctx());
         self.emoji_picker(ui.ctx());
         if let Some(viewer) = &self.image_viewer
@@ -327,6 +330,8 @@ impl ChatApp {
             workspace: None,
             selected: None,
             new_after: None,
+            back: Vec::new(),
+            forward: Vec::new(),
             messages: Vec::new(),
             history_cache: HashMap::new(),
             unread_only: false,
@@ -631,6 +636,23 @@ impl ChatApp {
             .frame(theme::header_frame())
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
+                    if ui
+                        .add_enabled(!self.back.is_empty(), egui::Button::new("←").frame(false))
+                        .on_hover_text(format!("Back · {BACK_LABEL}"))
+                        .clicked()
+                    {
+                        self.go_back();
+                    }
+                    if ui
+                        .add_enabled(
+                            !self.forward.is_empty(),
+                            egui::Button::new("→").frame(false),
+                        )
+                        .on_hover_text(format!("Forward · {FORWARD_LABEL}"))
+                        .clicked()
+                    {
+                        self.go_forward();
+                    }
                     ui.heading(conversation_label(&conversation));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if self.live_connected {
@@ -959,6 +981,55 @@ impl ChatApp {
     }
 
     fn select(&mut self, conversation: Conversation) {
+        if let Some(current) = self
+            .selected
+            .clone()
+            .filter(|current| current.id != conversation.id)
+        {
+            push_history(&mut self.back, current);
+            self.forward.clear();
+        }
+        self.show_conversation(conversation);
+    }
+
+    fn go_back(&mut self) {
+        if let Some(conversation) = self.back.pop() {
+            if let Some(current) = self.selected.clone() {
+                push_history(&mut self.forward, current);
+            }
+            self.show_conversation(conversation);
+        }
+    }
+
+    fn go_forward(&mut self) {
+        if let Some(conversation) = self.forward.pop() {
+            if let Some(current) = self.selected.clone() {
+                push_history(&mut self.back, current);
+            }
+            self.show_conversation(conversation);
+        }
+    }
+
+    fn history_navigation(&mut self, ctx: &egui::Context) {
+        if self.switcher.is_some() || self.picker.is_some() || self.image_viewer.is_some() {
+            return;
+        }
+        let (back, forward) = ctx.input_mut(|input| {
+            (
+                input.consume_key(BACK_SHORTCUT.0, BACK_SHORTCUT.1)
+                    || input.pointer.button_pressed(egui::PointerButton::Extra1),
+                input.consume_key(FORWARD_SHORTCUT.0, FORWARD_SHORTCUT.1)
+                    || input.pointer.button_pressed(egui::PointerButton::Extra2),
+            )
+        });
+        if back {
+            self.go_back();
+        } else if forward {
+            self.go_forward();
+        }
+    }
+
+    fn show_conversation(&mut self, conversation: Conversation) {
         self.todos_open = false;
         if self.activity_open {
             self.thread = None;
@@ -1437,6 +1508,36 @@ impl ChatApp {
     }
 }
 
+fn push_history(stack: &mut Vec<Conversation>, conversation: Conversation) {
+    if stack.last().is_some_and(|last| last.id == conversation.id) {
+        return;
+    }
+    if stack.len() == HISTORY_LIMIT {
+        stack.remove(0);
+    }
+    stack.push(conversation);
+}
+
+const HISTORY_LIMIT: usize = 50;
+#[cfg(target_os = "macos")]
+const BACK_SHORTCUT: (egui::Modifiers, egui::Key) =
+    (egui::Modifiers::COMMAND, egui::Key::OpenBracket);
+#[cfg(target_os = "macos")]
+const FORWARD_SHORTCUT: (egui::Modifiers, egui::Key) =
+    (egui::Modifiers::COMMAND, egui::Key::CloseBracket);
+#[cfg(target_os = "macos")]
+const BACK_LABEL: &str = "⌘[";
+#[cfg(target_os = "macos")]
+const FORWARD_LABEL: &str = "⌘]";
+#[cfg(not(target_os = "macos"))]
+const BACK_SHORTCUT: (egui::Modifiers, egui::Key) = (egui::Modifiers::ALT, egui::Key::ArrowLeft);
+#[cfg(not(target_os = "macos"))]
+const FORWARD_SHORTCUT: (egui::Modifiers, egui::Key) =
+    (egui::Modifiers::ALT, egui::Key::ArrowRight);
+#[cfg(not(target_os = "macos"))]
+const BACK_LABEL: &str = "Alt+←";
+#[cfg(not(target_os = "macos"))]
+const FORWARD_LABEL: &str = "Alt+→";
 #[cfg(target_os = "macos")]
 const SWITCHER_SHORTCUT: &str = "⌘P";
 #[cfg(not(target_os = "macos"))]
@@ -1701,6 +1802,28 @@ mod tests {
             .find(|c| c.id == id)
             .cloned()
             .unwrap()
+    }
+
+    #[test]
+    fn back_and_forward_walk_visited_conversations() {
+        let mut app = app();
+        for id in ["C1", "C2", "C3"] {
+            app.select(conversation(&app, id));
+        }
+        let selected = |app: &ChatApp| app.selected.as_ref().unwrap().id.clone();
+        app.go_back();
+        assert_eq!(selected(&app), "C2");
+        app.go_back();
+        assert_eq!(selected(&app), "C1");
+        app.go_back();
+        assert_eq!(selected(&app), "C1");
+        app.go_forward();
+        assert_eq!(selected(&app), "C2");
+        // Opening a different conversation starts a new branch.
+        app.select(conversation(&app, "D2"));
+        assert!(app.forward.is_empty());
+        app.go_back();
+        assert_eq!(selected(&app), "C2");
     }
 
     #[test]
