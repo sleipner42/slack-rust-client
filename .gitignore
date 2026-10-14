@@ -1,0 +1,52 @@
+# Build and distribution output
+/target/
+/dist/
+*.app/
+*.dmg
+*.dSYM/
+
+# Local configuration, credentials, and runtime data
+.env
+.env.*
+!.env.example
+*.local.json
+*.local.toml
+credentials.json
+credentials.*.json
+cookies*.json
+cookies*.sqlite*
+session.json
+session*.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+/cache/
+/logs/
+/import/
+/local-storage-copy/
+/Cookies
+/Cookies-*
+/Local Storage/
+/Session Storage/
+
+# Personal editor and agent settings
+/.claude/
+/.codex/
+/.agents/
+/.aws/
+/.idea/
+/.vscode/
+.DS_Store
+._*
+*.swp
+*.swo
+*~

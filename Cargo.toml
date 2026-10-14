@@ -1,0 +1,30 @@
+[package]
+name = "better-slack"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aes = "0.8"
+cbc = "0.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+dirs = "7.0.0"
+eframe = "0.36"
+egui_extras = { version = "0.36", features = ["image"] }
+emojis = "0.9.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+pbkdf2 = "0.12"
+reqwest = { version = "0.13", features = ["blocking", "form", "json"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusty-leveldb = "3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha1 = "0.10"
+tao = "0.37"
+tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+wry = "0.57"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSResponder"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }

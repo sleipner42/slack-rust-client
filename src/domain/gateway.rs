@@ -1,0 +1,83 @@
+use std::collections::{HashMap, HashSet};
+
+use crate::domain::model::{
+    Conversation, LiveEvent, Message, ReadState, SavedMessage, SavedTodo, SavedTodoPage,
+    SidebarSection, SlackError, UserProfile,
+};
+
+pub trait SlackGateway: Send + Sync {
+    fn mark_activity_read(&self, _item: &super::activity::ActivityItem) -> Result<(), SlackError> {
+        Err(SlackError(
+            "Updating Activity is unavailable for this workspace.".into(),
+        ))
+    }
+    fn activity(
+        &self,
+        _query: super::activity::ActivityQuery,
+        _cursor: &str,
+    ) -> Result<super::activity::ActivityPage, SlackError> {
+        Err(SlackError(
+            "Activity is unavailable for this workspace.".into(),
+        ))
+    }
+    fn activity_messages(
+        &self,
+        _items: &[super::activity::ActivityItem],
+    ) -> Result<HashMap<(String, String), SavedMessage>, SlackError> {
+        Ok(HashMap::new())
+    }
+    fn workspace_namespace(&self) -> Option<String> {
+        None
+    }
+    fn cache_namespace(&self) -> Option<String> {
+        None
+    }
+    fn saved_todos(&self, _completed: bool, _cursor: &str) -> Result<SavedTodoPage, SlackError> {
+        Err(SlackError(
+            "Slack to-dos are unavailable for this workspace.".into(),
+        ))
+    }
+    fn saved_message(&self, _item: &SavedTodo) -> Result<Option<SavedMessage>, SlackError> {
+        Ok(None)
+    }
+    fn complete_todo(&self, _item: &SavedTodo) -> Result<(), SlackError> {
+        Err(SlackError(
+            "Completing Slack to-dos is unavailable for this workspace.".into(),
+        ))
+    }
+    fn current_user_id(&self) -> Result<String, SlackError>;
+    fn list_conversations(&self) -> Result<Vec<Conversation>, SlackError>;
+    fn list_sections(&self) -> Result<Vec<SidebarSection>, SlackError>;
+    fn read_states(&self) -> Result<HashMap<String, ReadState>, SlackError>;
+    fn muted_conversations(&self) -> Result<HashSet<String>, SlackError>;
+    fn custom_emoji(&self) -> Result<HashMap<String, String>, SlackError>;
+    fn fetch_messages(&self, conversation_id: &str) -> Result<Vec<Message>, SlackError>;
+    /// Optional metadata work, kept separate from the first history response.
+    fn enrich_messages(&self, _messages: &mut [Message]) {}
+    fn fetch_replies(
+        &self,
+        conversation_id: &str,
+        thread_ts: &str,
+    ) -> Result<Vec<Message>, SlackError>;
+    fn user_profile(&self, user_id: &str) -> Result<UserProfile, SlackError>;
+    fn post_message(
+        &self,
+        conversation_id: &str,
+        text: &str,
+        thread_ts: Option<&str>,
+        client_msg_id: &str,
+    ) -> Result<String, SlackError>;
+    fn mark_read(&self, conversation_id: &str, ts: &str) -> Result<(), SlackError>;
+    fn set_reaction(
+        &self,
+        conversation_id: &str,
+        ts: &str,
+        name: &str,
+        add: bool,
+    ) -> Result<(), SlackError>;
+    fn download(&self, url: &str) -> Result<Vec<u8>, SlackError>;
+}
+
+pub trait RealtimeSource: Send + Sync {
+    fn listen(&self, on_event: &mut dyn FnMut(LiveEvent)) -> Result<(), SlackError>;
+}

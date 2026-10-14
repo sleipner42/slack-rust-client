@@ -1,0 +1,14 @@
+mod activity;
+pub mod app;
+mod composer;
+mod dock;
+mod emoji_picker;
+mod image_viewer;
+mod images;
+pub mod labels;
+mod message_view;
+mod outbox;
+pub mod quick_switcher;
+mod rich_text;
+mod theme;
+mod todos;
