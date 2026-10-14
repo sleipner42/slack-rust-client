@@ -6,6 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::application::chat_service::ChatService;
+use crate::application::emoji_catalog::bundled_image;
 use eframe::egui;
 
 pub struct ImageCache {
@@ -87,6 +88,21 @@ impl ImageCache {
             Some(ImageState::Loading) => None,
             Some(ImageState::Failed(at)) if at.elapsed() < Duration::from_secs(60) => None,
             _ => {
+                // Bundled emoji decode in microseconds; skip the download queue.
+                if let Some(image) = bundled_image(url).and_then(|png| decode_image(png.to_vec())) {
+                    let texture = self
+                        .ctx
+                        .load_texture(url, image, egui::TextureOptions::LINEAR);
+                    let image = egui::Image::new((texture.id(), texture.size_vec2()));
+                    self.states.insert(
+                        url.to_string(),
+                        ImageState::Ready {
+                            texture,
+                            used: Instant::now(),
+                        },
+                    );
+                    return Some(image);
+                }
                 self.states.insert(url.to_string(), ImageState::Loading);
                 let _ = self.requests.send(url.to_string());
                 None

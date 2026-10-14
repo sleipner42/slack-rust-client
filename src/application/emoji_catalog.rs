@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum EmojiGlyph {
@@ -77,14 +78,49 @@ impl EmojiCatalog {
                     .map(|c| format!("{:x}", c as u32))
                     .collect::<Vec<_>>()
                     .join("-");
-                Some(format!(
-                    "https://cdn.jsdelivr.net/gh/jdecked/twemoji@17.0.3/assets/72x72/{codepoints}.png"
-                ))
+                Some(format!("{TWEMOJI_BASE}{codepoints}.png"))
             }
             EmojiGlyph::Missing(_) => None,
         }
     }
 }
+
+/// Standard emoji ship inside the binary; the CDN URL stays the cache key and the
+/// fallback for anything the bundled Twemoji release lacks.
+pub fn bundled_image(url: &str) -> Option<&'static [u8]> {
+    let codepoints = url.strip_prefix(TWEMOJI_BASE)?.strip_suffix(".png")?;
+    let (index, data) = PACK.get_or_init(|| parse_pack(TWEMOJI_PACK).unwrap_or_default());
+    let &(offset, length) = index.get(codepoints)?;
+    data.get(offset..offset + length)
+}
+
+type Pack = (HashMap<&'static str, (usize, usize)>, &'static [u8]);
+
+static PACK: OnceLock<Pack> = OnceLock::new();
+
+/// Reads the index written by `scripts/build-emoji-pack.py`.
+fn parse_pack(pack: &'static [u8]) -> Option<Pack> {
+    let mut rest = pack.strip_prefix(b"TWEMOJI1")?;
+    let mut take = |length: usize| {
+        let (head, tail) = rest.split_at_checked(length)?;
+        rest = tail;
+        Some(head)
+    };
+    let u32_at = |bytes: &[u8]| bytes.try_into().ok().map(u32::from_le_bytes);
+    let count = u32_at(take(4)?)?;
+    let mut index = HashMap::with_capacity(count as usize);
+    for _ in 0..count {
+        let length = take(1)?[0] as usize;
+        let name = std::str::from_utf8(take(length)?).ok()?;
+        let offset = u32_at(take(4)?)? as usize;
+        let size = u32_at(take(4)?)? as usize;
+        index.insert(name, (offset, size));
+    }
+    Some((index, rest))
+}
+
+static TWEMOJI_PACK: &[u8] = include_bytes!("../../assets/emoji/twemoji-72.pack");
+const TWEMOJI_BASE: &str = "https://cdn.jsdelivr.net/gh/jdecked/twemoji@17.0.3/assets/72x72/";
 
 const SLACK_ALIASES: [(&str, &str); 9] = [
     ("thumbsup", "+1"),
@@ -101,6 +137,48 @@ const SLACK_ALIASES: [(&str, &str); 9] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_pack_serves_standard_emoji_without_downloads() {
+        let catalog = EmojiCatalog::default();
+        for name in [
+            "+1",
+            "heart",
+            "tada",
+            "eyes",
+            "white_check_mark",
+            "joy",
+            "pray",
+        ] {
+            let url = catalog.image_url(name).unwrap();
+            let png = bundled_image(&url).unwrap_or_else(|| panic!("{name} missing"));
+            assert!(png.starts_with(b"\x89PNG"), "{name}");
+        }
+        assert!(bundled_image(&catalog.image_url("+1::skin-tone-3").unwrap()).is_some());
+        assert!(bundled_image("https://emoji.slack-edge.com/T1/party/1.gif").is_none());
+        let shortcodes: Vec<_> = emojis::iter().filter_map(|e| e.shortcode()).collect();
+        let missing: Vec<_> = shortcodes
+            .iter()
+            .filter(|name| bundled_image(&catalog.image_url(name).unwrap()).is_none())
+            .collect();
+        // Anything missing still loads from the CDN; keep the gap small.
+        assert!(
+            missing.len() * 100 <= shortcodes.len(),
+            "{} of {} missing: {missing:?}",
+            missing.len(),
+            shortcodes.len()
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_packs() {
+        assert!(parse_pack(b"").is_none());
+        assert!(parse_pack(b"TWEMOJI1\x01\x00\x00\x00\x05ab").is_none());
+        let (index, data) =
+            parse_pack(b"TWEMOJI1\x01\x00\x00\x00\x02ab\x00\x00\x00\x00\x01\x00\x00\x00Z").unwrap();
+        assert_eq!(index["ab"], (0, 1));
+        assert_eq!(data, b"Z");
+    }
 
     #[test]
     fn resolves_standard_custom_and_missing() {
