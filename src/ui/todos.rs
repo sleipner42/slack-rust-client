@@ -166,7 +166,7 @@ impl Todos {
         ui: &mut egui::Ui,
         emoji: &EmojiCatalog,
         images: &mut ImageCache,
-    ) -> Option<Attachment> {
+    ) -> Option<(Attachment, message_view::AttachmentClick)> {
         let mut close = false;
         egui::Panel::top("todo_detail_header")
             .exact_size(theme::HEADER_HEIGHT)
@@ -255,8 +255,10 @@ impl Todos {
                         );
                         for attachment in &message.attachments {
                             ui.add_space(12.0);
-                            if message_view::attachment_view(ui, attachment, images) {
-                                image = Some(attachment.clone());
+                            if let Some(click) =
+                                message_view::attachment_view(ui, attachment, images)
+                            {
+                                image = Some((attachment.clone(), click));
                             }
                         }
                     } else {

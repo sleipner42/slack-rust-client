@@ -15,6 +15,7 @@ pub enum MessageAction {
     OpenThread(String),
     ToggleReaction { ts: String, name: String, add: bool },
     PickReaction(String),
+    Download(Attachment),
     Edit(String),
     SaveEdit,
     CancelEdit,
@@ -358,8 +359,14 @@ fn message_row(
                     }
                     for attachment in &message.attachments {
                         ui.add_space(4.0);
-                        if attachment_view(ui, attachment, context.images) {
-                            action = Some(MessageAction::OpenImage(attachment.clone()));
+                        match attachment_view(ui, attachment, context.images) {
+                            Some(AttachmentClick::View) => {
+                                action = Some(MessageAction::OpenImage(attachment.clone()));
+                            }
+                            Some(AttachmentClick::Download) => {
+                                action = Some(MessageAction::Download(attachment.clone()));
+                            }
+                            None => {}
                         }
                     }
                     if !message.reactions.is_empty()
@@ -863,11 +870,16 @@ fn reaction_button(
     })
 }
 
+pub enum AttachmentClick {
+    View,
+    Download,
+}
+
 pub(super) fn attachment_view(
     ui: &mut egui::Ui,
     attachment: &Attachment,
     images: &mut ImageCache,
-) -> bool {
+) -> Option<AttachmentClick> {
     let mut open = false;
     let target = attachment
         .permalink
@@ -944,12 +956,21 @@ pub(super) fn attachment_view(
 
     if attachment.preview_url.is_some() {
         open |= ui.link(RichText::new(&attachment.name).small()).clicked();
+    } else if attachment.full_url.is_some() {
+        // Slack's file page only redirects to the desktop app; fetch the file itself.
+        if ui
+            .link(RichText::new(&attachment.name).small())
+            .on_hover_text("Download to your Downloads folder")
+            .clicked()
+        {
+            return Some(AttachmentClick::Download);
+        }
     } else if let Some(target) = target {
         ui.hyperlink_to(RichText::new(&attachment.name).small(), target);
-    } else if attachment.preview_url.is_none() {
+    } else {
         ui.weak(RichText::new(&attachment.name).small());
     }
-    open
+    open.then_some(AttachmentClick::View)
 }
 
 /// Long bodies (alert tracebacks and the like) start folded, as in Slack.

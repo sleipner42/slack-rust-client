@@ -5,6 +5,7 @@ pub mod credential_store;
 #[cfg(test)]
 pub mod demo;
 pub mod desktop_session_import;
+pub mod downloads;
 pub mod slack_api;
 pub mod slack_parsing;
 pub mod slack_realtime;

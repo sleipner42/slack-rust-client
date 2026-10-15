@@ -709,6 +709,16 @@ impl SlackGateway for SlackHttpGateway {
                 response.status()
             )));
         }
+        let html = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/html"));
+        if html && !url.to_lowercase().ends_with(".html") {
+            return Err(SlackError(
+                "Slack returned a web page instead of the file; try signing in again.".into(),
+            ));
+        }
         response
             .bytes()
             .map(|bytes| bytes.to_vec())

@@ -21,7 +21,7 @@ use crate::ui::image_viewer::ImageViewer;
 use crate::ui::images::ImageCache;
 use crate::ui::labels::{conversation_label, paint_sidebar_icon};
 use crate::ui::message_view::{
-    MessageAction, MessageContext, MessageEdit, loading_messages, message_list,
+    AttachmentClick, MessageAction, MessageContext, MessageEdit, loading_messages, message_list,
 };
 use crate::ui::outbox::{Outbox, SendRequest};
 use crate::ui::quick_switcher::{QuickSwitcher, SwitcherOutcome};
@@ -123,6 +123,7 @@ enum UiEvent {
     MessagesCached(ComposeTarget, Vec<DisplayMessage>),
     MessagesPreview(ComposeTarget, Vec<DisplayMessage>),
     MessageSent(SendRequest, Result<String, SlackError>),
+    Downloaded(String, Result<std::path::PathBuf, SlackError>),
     MessageEdited {
         list: ComposeTarget,
         ts: String,
@@ -787,9 +788,13 @@ impl ChatApp {
 
     fn todo_details(&mut self, ui: &mut egui::Ui) {
         if let (Some(todos), Some(workspace)) = (&mut self.todos, &self.workspace)
-            && let Some(attachment) = todos.show_details(ui, &workspace.emoji, &mut self.images)
+            && let Some((attachment, click)) =
+                todos.show_details(ui, &workspace.emoji, &mut self.images)
         {
-            self.image_viewer = Some(ImageViewer::new(attachment));
+            match click {
+                AttachmentClick::View => self.image_viewer = Some(ImageViewer::new(attachment)),
+                AttachmentClick::Download => self.download(attachment),
+            }
         }
     }
 
@@ -1154,6 +1159,7 @@ impl ChatApp {
                 });
                 self.load_messages(target);
             }
+            MessageAction::Download(attachment) => self.download(attachment),
             MessageAction::OpenImage(attachment) => {
                 self.image_viewer = Some(ImageViewer::new(attachment));
             }
@@ -1164,6 +1170,20 @@ impl ChatApp {
                 self.set_reaction(conversation_id, ts, name, add)
             }
         }
+    }
+
+    fn download(&mut self, attachment: crate::domain::model::Attachment) {
+        let Some(url) = attachment.full_url.clone() else {
+            return;
+        };
+        let name = attachment.name;
+        self.status = Some(format!("Downloading {name}…"));
+        self.spawn(move |service| {
+            let result = service
+                .download_file(&url)
+                .and_then(|bytes| crate::infrastructure::downloads::save(&name, &bytes));
+            UiEvent::Downloaded(name, result)
+        });
     }
 
     fn list_messages(&self, list: &ComposeTarget) -> &[DisplayMessage] {
@@ -1466,6 +1486,12 @@ impl ChatApp {
                     text,
                     result,
                 } => self.finish_edit(list, ts, text, result),
+                UiEvent::Downloaded(name, result) => {
+                    self.status = Some(match result {
+                        Ok(path) => format!("Saved {name} to {}", path.display()),
+                        Err(error) => format!("Could not download {name}: {error}"),
+                    });
+                }
                 UiEvent::ReactionSet {
                     conversation_id,
                     ts,

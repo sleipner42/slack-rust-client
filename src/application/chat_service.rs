@@ -492,6 +492,11 @@ impl ChatService {
         self.gateway.set_reaction(conversation_id, ts, name, add)
     }
 
+    /// Fetch a file for saving; unlike images it is not kept in the cache.
+    pub fn download_file(&self, url: &str) -> Result<Vec<u8>, SlackError> {
+        self.gateway.download(url)
+    }
+
     pub fn download(&self, url: &str) -> Result<Vec<u8>, SlackError> {
         if let Some(bytes) = self
             .cache
