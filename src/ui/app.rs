@@ -726,7 +726,7 @@ impl ChatApp {
                         .stick_to_bottom(true)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            let action = message_list(
+                            let list = message_list(
                                 ui,
                                 &conversation.id,
                                 &self.outbox.messages(&target, &self.messages),
@@ -746,7 +746,8 @@ impl ChatApp {
                                 );
                                 ui.ctx().request_discard("show outgoing message");
                             }
-                            action
+                            crate::ui::rich_text::scroll_text_selection(ui, list.selecting);
+                            list
                         }),
                 )
             })
@@ -754,7 +755,7 @@ impl ChatApp {
         let Some(output) = output else {
             return;
         };
-        if let Some(action) = output.inner {
+        if let Some(action) = output.inner.action {
             self.message_action(conversation.id.clone(), action);
         }
         let at_bottom =
@@ -896,7 +897,7 @@ impl ChatApp {
                     .stick_to_bottom(true)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        let action = message_list(
+                        let list = message_list(
                             ui,
                             "thread",
                             &self.outbox.messages(&target, &thread.messages),
@@ -916,7 +917,8 @@ impl ChatApp {
                             );
                             ui.ctx().request_discard("show outgoing reply");
                         }
-                        action
+                        crate::ui::rich_text::scroll_text_selection(ui, list.selecting);
+                        list.action
                     })
                     .inner
             })

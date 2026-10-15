@@ -231,7 +231,7 @@ impl Todos {
             });
         let mut image = None;
         theme::timeline_frame().show(ui, |ui| {
-            let scroll = egui::ScrollArea::vertical()
+            egui::ScrollArea::vertical()
                 .id_salt((
                     "todo_detail",
                     &selected.task.item.conversation_id,
@@ -269,9 +269,8 @@ impl Todos {
                         );
                     }
                     ui.add_space(16.0);
-                    selecting
+                    super::rich_text::scroll_text_selection(ui, selecting);
                 });
-            super::rich_text::scroll_text_selection(ui.ctx(), &scroll);
         });
         if complete {
             self.complete_selected();

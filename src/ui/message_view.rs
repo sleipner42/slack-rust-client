@@ -54,13 +54,32 @@ pub(super) const QUICK_REACTIONS: [(&str, &str); 3] = [
 
 type RowSignature = (u64, bool, bool, bool, bool, u8);
 
+pub struct MessageListOutput {
+    pub action: Option<MessageAction>,
+    /// A text selection is being dragged; the caller scrolls at the edges.
+    pub selecting: bool,
+}
+
 pub fn message_list(
     ui: &mut egui::Ui,
     id_salt: &str,
     messages: &[DisplayMessage],
     context: &mut MessageContext<'_>,
-) -> Option<MessageAction> {
+) -> MessageListOutput {
     let mut action = None;
+    let mut selecting = false;
+    // A selection must survive its anchor scrolling out of view: keep every row
+    // laid out while one exists, and route hidden text to an invisible layer.
+    let keep_offscreen = ui
+        .ctx()
+        .with_plugin::<egui::text_selection::LabelSelectionState, _>(|state| state.has_selection())
+        .unwrap_or(false);
+    let mut offscreen = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(("offscreen_selection", id_salt))
+            .invisible(),
+    );
+    offscreen.set_clip_rect(egui::Rect::EVERYTHING);
     let mut previous: Option<&DisplayMessage> = None;
     let cache_id = ui.id().with(("message_layout", id_salt));
     let mut cache = ui
@@ -107,7 +126,7 @@ pub fn message_list(
         {
             let rect =
                 egui::Rect::from_min_size(ui.next_widget_position(), egui::vec2(width, height));
-            if !ui.is_rect_visible(rect.expand2(egui::vec2(0.0, 160.0))) {
+            if !keep_offscreen && !ui.is_rect_visible(rect.expand2(egui::vec2(0.0, 160.0))) {
                 ui.allocate_exact_size(rect.size(), egui::Sense::hover());
                 previous = Some(message);
                 continue;
@@ -120,9 +139,17 @@ pub fn message_list(
             if new {
                 new_separator(ui);
             }
-            if let Some(row_action) =
-                message_row(ui, message, compact, &time, context, &mut toolbar_hover)
-            {
+            let row = message_row(
+                ui,
+                message,
+                compact,
+                &time,
+                context,
+                &mut toolbar_hover,
+                &offscreen,
+            );
+            selecting |= row.selecting;
+            if let Some(row_action) = row.action {
                 action = Some(row_action);
             }
         });
@@ -159,7 +186,7 @@ pub fn message_list(
         // Settle content size and the saved/bottom scroll position before presenting the frame.
         ui.ctx().request_discard("message layout changed");
     }
-    action
+    MessageListOutput { action, selecting }
 }
 
 pub fn loading_messages(ui: &mut egui::Ui) {
@@ -207,8 +234,10 @@ fn message_row(
     time: &DateTime<Local>,
     context: &mut MessageContext<'_>,
     toolbar_hover: &mut ToolbarHover,
-) -> Option<MessageAction> {
+    offscreen: &egui::Ui,
+) -> MessageListOutput {
     let mut action = None;
+    let mut selecting = false;
     let delivery = context.outbox.delivery(message);
     let confirmed = delivery.is_none_or(|state| matches!(state, Delivery::Confirmed));
     ui.add_space(if compact { 0.0 } else { 8.0 });
@@ -250,7 +279,7 @@ fn message_row(
                             .on_hover_text(time.format("%A, %B %e, %Y at %H:%M:%S").to_string());
                         });
                     }
-                    fade = folded_blocks(ui, message, context);
+                    (fade, selecting) = folded_blocks(ui, message, context, offscreen);
                     match delivery {
                         Some(Delivery::Sending) => {
                             let label = if message.attachments.is_empty() {
@@ -374,7 +403,7 @@ fn message_row(
             ui.close();
         }
     });
-    action
+    MessageListOutput { action, selecting }
 }
 
 // Draw after all message rows so short grouped rows cannot paint over the controls.
@@ -704,7 +733,8 @@ fn folded_blocks(
     ui: &mut egui::Ui,
     message: &DisplayMessage,
     context: &mut MessageContext<'_>,
-) -> Option<(egui::layers::ShapeIdx, egui::Rect)> {
+    offscreen: &egui::Ui,
+) -> (Option<(egui::layers::ShapeIdx, egui::Rect)>, bool) {
     let id = fold_id(&message.ts);
     let expanded = ui.data(|data| data.get_temp::<bool>(id)).unwrap_or(false);
     let top = ui.cursor().min;
@@ -723,7 +753,13 @@ fn folded_blocks(
         clip.max.y = clip.max.y.min(top.y + FOLDED_HEIGHT);
         body.set_clip_rect(clip);
     }
-    render_blocks(&mut body, &message.blocks, context.emoji, context.images);
+    let selecting = render_blocks(
+        &mut body,
+        &message.blocks,
+        context.emoji,
+        context.images,
+        Some(offscreen),
+    );
     let full = body.min_rect();
     let foldable = full.height() > FOLD_THRESHOLD;
     let shown = if foldable && folded {
@@ -733,7 +769,7 @@ fn folded_blocks(
     };
     ui.advance_cursor_after_rect(shown);
     if !foldable {
-        return None;
+        return (None, selecting);
     }
     let fade = folded.then(|| (ui.painter().add(egui::Shape::Noop), shown));
     if ui
@@ -742,7 +778,7 @@ fn folded_blocks(
     {
         ui.data_mut(|data| data.insert_temp(id, folded));
     }
-    fade
+    (fade, selecting)
 }
 
 fn fold_id(ts: &str) -> egui::Id {
@@ -891,7 +927,8 @@ mod tests {
                                 outbox: &outbox,
                                 new_after: None,
                             },
-                        );
+                        )
+                        .action;
                         height = ui.min_rect().height();
                     });
                 },
@@ -1039,6 +1076,114 @@ mod tests {
         );
         assert!(frame(&attachment, 200.0) < resolved_height);
         assert!((frame(&attachment, 700.0) - resolved_height).abs() < 1.0);
+    }
+
+    #[test]
+    fn dragging_a_selection_to_the_top_scrolls_and_keeps_the_offscreen_anchor() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        ctx.enable_accesskit();
+        let service = Arc::new(ChatService::new(Arc::new(DemoGateway::new())));
+        let workspace = service.load_workspace().unwrap();
+        let template = service.messages("C1").unwrap().remove(0);
+        let messages: Vec<_> = (0..40)
+            .map(|index| {
+                let mut message = template.clone();
+                // Far enough apart that every row has its own header.
+                message.ts = (1_790_000_000 + index * 4000).to_string();
+                message.avatar_url = None;
+                message.attachments.clear();
+                message.reactions.clear();
+                message.reply_count = 0;
+                message.blocks = vec![Block::Paragraph(vec![Inline::Text {
+                    text: format!("Message {index:02}"),
+                    style: TextStyle::default(),
+                }])];
+                message
+            })
+            .collect();
+        let mut images = ImageCache::new(service, ctx.clone());
+        let mut time = 0.0;
+        let mut frame = |events| {
+            time += 1.0 / 60.0;
+            let mut offset = 0.0;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    events,
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(500.0, 400.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    let scroll = egui::ScrollArea::vertical()
+                        .id_salt("selection_scroll")
+                        .stick_to_bottom(true)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            let list = message_list(
+                                ui,
+                                "selection",
+                                &messages,
+                                &mut MessageContext {
+                                    emoji: &workspace.emoji,
+                                    images: &mut images,
+                                    self_user_id: "me",
+                                    allow_threads: true,
+                                    outbox: &Outbox::default(),
+                                    new_after: None,
+                                },
+                            );
+                            crate::ui::rich_text::scroll_text_selection(ui, list.selecting);
+                        });
+                    offset = scroll.state.offset.y;
+                },
+            );
+            let last = output
+                .platform_output
+                .accesskit_update
+                .take()
+                .and_then(|update| {
+                    update.nodes.into_iter().find_map(|(_, node)| {
+                        (node.value().or(node.label()) == Some("Message 39"))
+                            .then(|| node.bounds())
+                            .flatten()
+                    })
+                })
+                .map(|b| egui::pos2(b.x0 as f32 + 4.0, ((b.y0 + b.y1) / 2.0) as f32));
+            output.textures_delta.clear();
+            (offset, last, output.platform_output.commands)
+        };
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(vec![]);
+        let (bottom, last, _) = frame(vec![]);
+        let start = last.expect("the newest message is visible at the bottom");
+        frame(vec![egui::Event::PointerMoved(start), button(start, true)]);
+        frame(vec![egui::Event::PointerMoved(egui::pos2(start.x, 2.0))]);
+        for _ in 0..240 {
+            frame(vec![]);
+        }
+        let (offset, _, commands) = frame(vec![egui::Event::Copy]);
+        assert!(
+            offset < bottom - 500.0,
+            "drag at the top must scroll up: {offset} from {bottom}"
+        );
+        let copied = commands
+            .iter()
+            .find_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .expect("the selection must survive its anchor scrolling away");
+        assert!(copied.contains("Message 39"), "{copied}");
+        assert!(copied.contains("Message 30"), "{copied}");
     }
 
     #[test]

@@ -5,19 +5,25 @@ use crate::domain::message_text::{Block, Inline};
 use crate::ui::images::ImageCache;
 use crate::ui::theme;
 
+/// Returns whether a text selection is being dragged in these blocks.
 pub fn render_blocks(
     ui: &mut egui::Ui,
     blocks: &[Block],
     emoji: &EmojiCatalog,
     images: &mut ImageCache,
-) {
+    offscreen_selection: Option<&egui::Ui>,
+) -> bool {
+    let mut selecting = false;
     for block in blocks {
-        match block {
-            Block::Paragraph(inlines) => render_inlines(ui, inlines, emoji, images, None),
-            Block::Quote(inlines) => render_quote(ui, inlines, emoji, images, None),
-            Block::Code(code) => render_code(ui, code, None),
+        selecting |= match block {
+            Block::Paragraph(inlines) => {
+                render_inlines(ui, inlines, emoji, images, offscreen_selection)
+            }
+            Block::Quote(inlines) => render_quote(ui, inlines, emoji, images, offscreen_selection),
+            Block::Code(code) => render_code(ui, code, offscreen_selection),
         };
     }
+    selecting
 }
 
 pub fn render_emoji(
@@ -390,15 +396,14 @@ fn selectable_label(
     response
 }
 
-/// Only run while dragging text in this pane; never animate an idle window.
-pub fn scroll_text_selection(
-    ctx: &egui::Context,
-    scroll: &egui::scroll_area::ScrollAreaOutput<bool>,
-) {
-    if !scroll.inner {
+/// Call at the end of a scroll area's contents. Only runs while dragging text
+/// in this pane; never animates an idle window. Scrolling through
+/// `scroll_with_delta` also releases a stick-to-bottom timeline.
+pub fn scroll_text_selection(ui: &egui::Ui, selecting: bool) {
+    if !selecting {
         return;
     }
-    let Some((pointer, dt)) = ctx.input(|input| {
+    let Some((pointer, dt)) = ui.input(|input| {
         input
             .pointer
             .interact_pos()
@@ -406,7 +411,7 @@ pub fn scroll_text_selection(
     }) else {
         return;
     };
-    let rect = scroll.inner_rect;
+    let rect = ui.clip_rect();
     if pointer.x < rect.left() - 24.0 || pointer.x > rect.right() + 24.0 {
         return;
     }
@@ -418,13 +423,13 @@ pub fn scroll_text_selection(
     } else {
         0.0
     };
-    let max_offset = (scroll.content_size.y - rect.height()).max(0.0);
-    let offset = (scroll.state.offset.y + speed * dt).clamp(0.0, max_offset);
-    if (offset - scroll.state.offset.y).abs() > 0.01 {
-        let mut state = scroll.state;
-        state.offset.y = offset;
-        state.store(ctx, scroll.id);
-        ctx.request_repaint();
+    if speed != 0.0 {
+        // A positive delta moves the content down, i.e. scrolls up.
+        ui.scroll_with_delta_animation(
+            egui::vec2(0.0, -speed * dt),
+            egui::style::ScrollAnimation::none(),
+        );
+        ui.ctx().request_repaint();
     }
 }
 
@@ -548,9 +553,10 @@ mod tests {
                             .max_height(200.0)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                render_detail_blocks(ui, &blocks, &emoji, &mut images)
+                                let selecting =
+                                    render_detail_blocks(ui, &blocks, &emoji, &mut images);
+                                scroll_text_selection(ui, selecting);
                             });
-                        scroll_text_selection(ui.ctx(), &scroll);
                         offset = egui::scroll_area::State::load(ui.ctx(), scroll.id)
                             .unwrap()
                             .offset
