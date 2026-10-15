@@ -747,7 +747,11 @@ fn folded_blocks(
             ))
             .layout(*ui.layout()),
     );
-    let folded = !expanded;
+    // Clip only bodies measured as foldable on an earlier pass; shorter ones
+    // must render in full even though they exceed the folded height.
+    let height_id = id.with("height");
+    let measured = ui.data(|data| data.get_temp::<f32>(height_id));
+    let folded = !expanded && measured.is_some_and(|height| height > FOLD_THRESHOLD);
     if folded {
         let mut clip = body.clip_rect();
         clip.max.y = clip.max.y.min(top.y + FOLDED_HEIGHT);
@@ -761,8 +765,12 @@ fn folded_blocks(
         Some(offscreen),
     );
     let full = body.min_rect();
+    ui.data_mut(|data| data.insert_temp(height_id, full.height()));
     let foldable = full.height() > FOLD_THRESHOLD;
-    let shown = if foldable && folded {
+    if foldable && !expanded && !folded {
+        ui.ctx().request_discard("message fold measured");
+    }
+    let shown = if foldable && !expanded {
         egui::Rect::from_min_size(full.min, egui::vec2(full.width(), FOLDED_HEIGHT))
     } else {
         full
@@ -771,12 +779,12 @@ fn folded_blocks(
     if !foldable {
         return (None, selecting);
     }
-    let fade = folded.then(|| (ui.painter().add(egui::Shape::Noop), shown));
+    let fade = (!expanded).then(|| (ui.painter().add(egui::Shape::Noop), shown));
     if ui
-        .link(if folded { "Show more" } else { "Show less" })
+        .link(if expanded { "Show less" } else { "Show more" })
         .clicked()
     {
-        ui.data_mut(|data| data.insert_temp(id, folded));
+        ui.data_mut(|data| data.insert_temp(id, !expanded));
     }
     (fade, selecting)
 }
@@ -1235,27 +1243,42 @@ mod tests {
                 },
             );
             output.textures_delta.clear();
-            height
+            let clipped = output.shapes.iter().any(|clipped| {
+                matches!(&clipped.shape, egui::Shape::Text(text)
+                    if !clipped.clip_rect.contains_rect(text.visual_bounding_rect()))
+            });
+            (height, clipped)
         };
         let expand = |ts: &str, expanded: bool| {
             ctx.data_mut(|data| data.insert_temp(fold_id(ts), expanded));
         };
         let long = [message("1790000000", 60)];
-        let folded = height(&long);
+        let (folded, clipped) = height(&long);
+        assert!(clipped, "folded bodies are clipped");
         expand("1790000000", true);
-        let expanded = height(&long);
+        let (expanded, clipped) = height(&long);
+        assert!(!clipped);
         assert!(folded < FOLD_THRESHOLD, "folded height {folded}");
         assert!(expanded > folded + 400.0, "{expanded} vs {folded}");
         expand("1790000000", false);
-        assert!((height(&long) - folded).abs() < 1.0);
+        assert!((height(&long).0 - folded).abs() < 1.0);
 
         let short = [message("1790000001", 3)];
-        let before = height(&short);
+        let (before, _) = height(&short);
         expand("1790000001", true);
         assert!(
-            (height(&short) - before).abs() < 1.0,
+            (height(&short).0 - before).abs() < 1.0,
             "short messages never fold"
         );
+
+        // Taller than the folded height but below the threshold: shown in full.
+        let medium = [message("1790000002", 15)];
+        let (medium_height, clipped) = height(&medium);
+        assert!(
+            medium_height > FOLDED_HEIGHT && medium_height < FOLD_THRESHOLD,
+            "medium height {medium_height}"
+        );
+        assert!(!clipped, "medium messages are not cut off");
     }
 
     #[test]
