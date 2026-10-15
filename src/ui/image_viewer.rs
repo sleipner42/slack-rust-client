@@ -1,5 +1,6 @@
 use eframe::egui;
 
+use super::message_view::{AttachmentClick, image_menu};
 use super::{images::ImageCache, theme};
 use crate::domain::model::Attachment;
 
@@ -12,8 +13,16 @@ impl ImageViewer {
         Self { attachment }
     }
 
-    /// Returns true when the viewer should close.
-    pub fn show(&self, ctx: &egui::Context, images: &mut ImageCache) -> bool {
+    pub fn attachment(&self) -> &Attachment {
+        &self.attachment
+    }
+
+    /// Returns whether the viewer should close, and any image menu choice.
+    pub fn show(
+        &self,
+        ctx: &egui::Context,
+        images: &mut ImageCache,
+    ) -> (bool, Option<AttachmentClick>) {
         let bounds = ctx.content_rect().size();
         let limit = egui::vec2(
             (bounds.x - 80.0).clamp(1.0, 1100.0),
@@ -48,6 +57,7 @@ impl ImageViewer {
             .unwrap_or(egui::vec2(limit.x.min(480.0), limit.y.min(320.0)));
         let canvas = egui::vec2(image_size.x.max(320.0).min(limit.x), image_size.y);
         let mut close = false;
+        let mut menu = None;
         let response = egui::Modal::new(egui::Id::new("image_viewer"))
             .frame(theme::modal_frame())
             .show(ctx, |ui| {
@@ -71,7 +81,12 @@ impl ImageViewer {
                     egui::Layout::centered_and_justified(egui::Direction::TopDown),
                     |ui| {
                         if let Some(image) = image {
-                            ui.add(image.fit_to_exact_size(image_size));
+                            let response = ui.add(
+                                image
+                                    .fit_to_exact_size(image_size)
+                                    .sense(egui::Sense::click()),
+                            );
+                            menu = image_menu(&response, &self.attachment);
                         } else if loading {
                             ui.spinner();
                         } else {
@@ -93,6 +108,6 @@ impl ImageViewer {
                     }
                 });
             });
-        close || response.should_close()
+        (close || response.should_close(), menu)
     }
 }

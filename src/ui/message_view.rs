@@ -16,6 +16,7 @@ pub enum MessageAction {
     ToggleReaction { ts: String, name: String, add: bool },
     PickReaction(String),
     Download(Attachment),
+    CopyImage(Attachment),
     Edit(String),
     SaveEdit,
     CancelEdit,
@@ -365,6 +366,9 @@ fn message_row(
                             }
                             Some(AttachmentClick::Download) => {
                                 action = Some(MessageAction::Download(attachment.clone()));
+                            }
+                            Some(AttachmentClick::CopyImage) => {
+                                action = Some(MessageAction::CopyImage(attachment.clone()));
                             }
                             None => {}
                         }
@@ -873,6 +877,32 @@ fn reaction_button(
 pub enum AttachmentClick {
     View,
     Download,
+    CopyImage,
+}
+
+/// Right-click actions for an image, as in Slack. Copy link is handled here.
+pub(super) fn image_menu(
+    response: &egui::Response,
+    attachment: &Attachment,
+) -> Option<AttachmentClick> {
+    let mut click = None;
+    response.context_menu(|ui| {
+        if ui.button("Copy image").clicked() {
+            click = Some(AttachmentClick::CopyImage);
+            ui.close();
+        }
+        if attachment.full_url.is_some() && ui.button("Download").clicked() {
+            click = Some(AttachmentClick::Download);
+            ui.close();
+        }
+        if let Some(link) = &attachment.permalink
+            && ui.button("Copy link to file").clicked()
+        {
+            ui.ctx().copy_text(link.clone());
+            ui.close();
+        }
+    });
+    click
 }
 
 pub(super) fn attachment_view(
@@ -881,6 +911,7 @@ pub(super) fn attachment_view(
     images: &mut ImageCache,
 ) -> Option<AttachmentClick> {
     let mut open = false;
+    let mut menu = None;
     let target = attachment
         .permalink
         .as_ref()
@@ -916,6 +947,7 @@ pub(super) fn attachment_view(
         };
         let (rect, response) = ui.allocate_exact_size(size, sense);
         if attachment.preview_url.is_some() {
+            menu = image_menu(&response, attachment);
             open = response
                 .on_hover_cursor(egui::CursorIcon::ZoomIn)
                 .on_hover_text("View image")
@@ -970,7 +1002,7 @@ pub(super) fn attachment_view(
     } else {
         ui.weak(RichText::new(&attachment.name).small());
     }
-    open.then_some(AttachmentClick::View)
+    menu.or(open.then_some(AttachmentClick::View))
 }
 
 /// Long bodies (alert tracebacks and the like) start folded, as in Slack.
@@ -1523,6 +1555,91 @@ mod tests {
             "the editor replaces the body"
         );
         assert!(editing.contains("Out of interest"), "shares stay visible");
+    }
+
+    #[test]
+    fn right_clicking_an_image_offers_copy_image() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let service = Arc::new(ChatService::new(Arc::new(DemoGateway::new())));
+        let workspace = service.load_workspace().unwrap();
+        let mut message = service.messages("C1").unwrap().remove(0);
+        message.avatar_url = None;
+        message.shares.clear();
+        message.attachments = vec![Attachment {
+            file_id: Some("F1".into()),
+            name: "photo.jpg".into(),
+            preview_url: Some("demo://preview.png".into()),
+            full_url: Some("demo://preview.png".into()),
+            permalink: Some("https://example.test/files/F1".into()),
+            width: Some(400),
+            height: Some(200),
+            preview_pending: false,
+        }];
+        let mut images = ImageCache::new(service, ctx.clone());
+        let image_rect = std::cell::Cell::new(egui::Rect::NOTHING);
+        let mut frame = |events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(700.0, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    message_list(
+                        ui,
+                        "image_menu",
+                        std::slice::from_ref(&message),
+                        &mut MessageContext {
+                            emoji: &workspace.emoji,
+                            images: &mut images,
+                            self_user_id: "me",
+                            allow_threads: true,
+                            outbox: &Outbox::default(),
+                            new_after: None,
+                            edit: None,
+                        },
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    egui::Shape::Rect(rect) if rect.fill == theme::SURFACE => {
+                        image_rect.set(image_rect.get().union(rect.rect));
+                        None
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        frame(vec![]);
+        frame(vec![]);
+        assert!(image_rect.get().is_positive(), "image placeholder drawn");
+        let at = image_rect.get().center();
+        let click = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![egui::Event::PointerMoved(at)]);
+        frame(vec![click(true)]);
+        frame(vec![click(false)]);
+        let shown = frame(vec![]);
+        assert!(shown.contains("Copy image"), "{shown}");
+        assert!(shown.contains("Copy link to file"));
+        assert!(
+            !shown.contains("Copy message text"),
+            "only the image menu opens"
+        );
     }
 
     #[test]

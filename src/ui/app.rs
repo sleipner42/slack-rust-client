@@ -124,6 +124,7 @@ enum UiEvent {
     MessagesPreview(ComposeTarget, Vec<DisplayMessage>),
     MessageSent(SendRequest, Result<String, SlackError>),
     Downloaded(String, Result<std::path::PathBuf, SlackError>),
+    ImageCopied(Result<egui::ColorImage, SlackError>),
     MessageEdited {
         list: ComposeTarget,
         ts: String,
@@ -217,10 +218,17 @@ impl eframe::App for ChatApp {
         self.history_navigation(ui.ctx());
         self.quick_switcher(ui.ctx());
         self.emoji_picker(ui.ctx());
-        if let Some(viewer) = &self.image_viewer
-            && viewer.show(ui.ctx(), &mut self.images)
-        {
-            self.image_viewer = None;
+        if let Some(viewer) = &self.image_viewer {
+            let (close, click) = viewer.show(ui.ctx(), &mut self.images);
+            let attachment = viewer.attachment().clone();
+            if close {
+                self.image_viewer = None;
+            }
+            match click {
+                Some(AttachmentClick::CopyImage) => self.copy_image(attachment),
+                Some(AttachmentClick::Download) => self.download(attachment),
+                Some(AttachmentClick::View) | None => {}
+            }
         }
         let modal_open =
             self.switcher.is_some() || self.picker.is_some() || self.image_viewer.is_some();
@@ -794,6 +802,7 @@ impl ChatApp {
             match click {
                 AttachmentClick::View => self.image_viewer = Some(ImageViewer::new(attachment)),
                 AttachmentClick::Download => self.download(attachment),
+                AttachmentClick::CopyImage => self.copy_image(attachment),
             }
         }
     }
@@ -1160,6 +1169,7 @@ impl ChatApp {
                 self.load_messages(target);
             }
             MessageAction::Download(attachment) => self.download(attachment),
+            MessageAction::CopyImage(attachment) => self.copy_image(attachment),
             MessageAction::OpenImage(attachment) => {
                 self.image_viewer = Some(ImageViewer::new(attachment));
             }
@@ -1183,6 +1193,24 @@ impl ChatApp {
                 .download_file(&url)
                 .and_then(|bytes| crate::infrastructure::downloads::save(&name, &bytes));
             UiEvent::Downloaded(name, result)
+        });
+    }
+
+    fn copy_image(&mut self, attachment: crate::domain::model::Attachment) {
+        let Some(url) = attachment.full_url.or(attachment.preview_url) else {
+            return;
+        };
+        self.status = Some(format!("Copying {}…", attachment.name));
+        self.spawn(move |service| {
+            UiEvent::ImageCopied(service.download(&url).and_then(|bytes| {
+                let image = image::load_from_memory(&bytes)
+                    .map_err(|error| SlackError(format!("Could not read the image: {error}")))?
+                    .to_rgba8();
+                Ok(egui::ColorImage::from_rgba_unmultiplied(
+                    [image.width() as usize, image.height() as usize],
+                    image.as_raw(),
+                ))
+            }))
         });
     }
 
@@ -1486,6 +1514,15 @@ impl ChatApp {
                     text,
                     result,
                 } => self.finish_edit(list, ts, text, result),
+                UiEvent::ImageCopied(result) => {
+                    self.status = Some(match result {
+                        Ok(image) => {
+                            self.ctx.copy_image(image);
+                            "Image copied to the clipboard".into()
+                        }
+                        Err(error) => format!("Could not copy the image: {error}"),
+                    });
+                }
                 UiEvent::Downloaded(name, result) => {
                     self.status = Some(match result {
                         Ok(path) => format!("Saved {name} to {}", path.display()),
