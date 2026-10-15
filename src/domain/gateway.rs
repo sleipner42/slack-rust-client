@@ -91,6 +91,16 @@ pub trait SlackGateway: Send + Sync {
         thread_ts: Option<&str>,
         client_msg_id: &str,
     ) -> Result<String, SlackError>;
+    fn update_message(
+        &self,
+        _conversation_id: &str,
+        _ts: &str,
+        _text: &str,
+    ) -> Result<(), SlackError> {
+        Err(SlackError(
+            "Editing messages is unavailable for this workspace.".into(),
+        ))
+    }
     fn mark_read(&self, conversation_id: &str, ts: &str) -> Result<(), SlackError>;
     fn set_reaction(
         &self,

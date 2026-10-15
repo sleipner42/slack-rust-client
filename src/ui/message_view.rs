@@ -2,7 +2,7 @@ use chrono::{DateTime, Local, TimeZone};
 use eframe::egui::{self, RichText};
 
 use super::outbox::{Delivery, Outbox};
-use crate::application::chat_service::DisplayMessage;
+use crate::application::chat_service::{DisplayMessage, DisplayShare};
 use crate::application::emoji_catalog::{EmojiCatalog, EmojiGlyph};
 use crate::domain::model::{Attachment, Reaction, ts_seconds};
 use crate::ui::images::ImageCache;
@@ -15,6 +15,32 @@ pub enum MessageAction {
     OpenThread(String),
     ToggleReaction { ts: String, name: String, add: bool },
     PickReaction(String),
+    Edit(String),
+    SaveEdit,
+    CancelEdit,
+}
+
+/// An own message being edited in place.
+pub struct MessageEdit {
+    pub ts: String,
+    pub text: String,
+    pub saving: bool,
+    pub error: Option<String>,
+    focus: bool,
+    ime_active: bool,
+}
+
+impl MessageEdit {
+    pub fn new(ts: String, text: String) -> Self {
+        Self {
+            ts,
+            text,
+            saving: false,
+            error: None,
+            focus: true,
+            ime_active: false,
+        }
+    }
 }
 
 pub struct MessageContext<'a> {
@@ -25,6 +51,7 @@ pub struct MessageContext<'a> {
     pub outbox: &'a Outbox,
     /// Read position when the conversation was opened; later messages are new.
     pub new_after: Option<&'a str>,
+    pub edit: Option<&'a mut MessageEdit>,
 }
 
 #[derive(Clone, Default)]
@@ -52,7 +79,7 @@ pub(super) const QUICK_REACTIONS: [(&str, &str); 3] = [
     ("question", "Question mark"),
 ];
 
-type RowSignature = (u64, bool, bool, bool, bool, u8);
+type RowSignature = (u64, bool, bool, bool, bool, u8, bool);
 
 pub struct MessageListOutput {
     pub action: Option<MessageAction>,
@@ -110,6 +137,10 @@ pub fn message_list(
         let expanded = ui
             .data(|data| data.get_temp::<bool>(fold_id(&message.ts)))
             .unwrap_or(false);
+        let editing = context
+            .edit
+            .as_ref()
+            .is_some_and(|edit| edit.ts == message.ts);
         let signature = (
             message.layout_key,
             compact,
@@ -120,6 +151,7 @@ pub fn message_list(
                 .outbox
                 .delivery(message)
                 .map_or(0, Delivery::layout_key),
+            editing,
         );
         if let Some((cached, height)) = cache.rows.get(&message.ts).copied()
             && cached == signature
@@ -279,7 +311,21 @@ fn message_row(
                             .on_hover_text(time.format("%A, %B %e, %Y at %H:%M:%S").to_string());
                         });
                     }
-                    (fade, selecting) = folded_blocks(ui, message, context, offscreen);
+                    match context
+                        .edit
+                        .as_deref_mut()
+                        .filter(|edit| edit.ts == message.ts)
+                    {
+                        Some(edit) => {
+                            if let Some(edit_action) = edit_box(ui, edit) {
+                                action = Some(edit_action);
+                            }
+                        }
+                        None => (fade, selecting) = folded_blocks(ui, message, context, offscreen),
+                    }
+                    for share in &message.shares {
+                        selecting |= shared_card(ui, share, context, offscreen);
+                    }
                     match delivery {
                         Some(Delivery::Sending) => {
                             let label = if message.attachments.is_empty() {
@@ -351,7 +397,7 @@ fn message_row(
             })
         })
         .response;
-    let toolbar_width = if context.allow_threads { 202.0 } else { 154.0 };
+    let toolbar_width = toolbar_width(message, context);
     let toolbar_rect = egui::Rect::from_min_size(
         egui::pos2(
             (response.rect.right() - toolbar_width).max(ui.clip_rect().left()),
@@ -397,6 +443,10 @@ fn message_row(
         });
     }
     response.context_menu(|ui| {
+        if can_edit(message, context) && ui.button("Edit message").clicked() {
+            action = Some(MessageAction::Edit(message.ts.clone()));
+            ui.close();
+        }
         if ui.button("Copy message text").clicked() {
             ui.ctx()
                 .copy_text(crate::domain::message_text::plain_text(&message.blocks));
@@ -467,8 +517,176 @@ fn message_toolbar(
                     message.thread_ts.as_ref().unwrap_or(&message.ts).clone(),
                 ));
             }
+            if can_edit(message, context)
+                && ui
+                    .add_sized(
+                        [40.0, 28.0],
+                        egui::Button::new("Edit").frame_when_inactive(false),
+                    )
+                    .clicked()
+            {
+                action = Some(MessageAction::Edit(message.ts.clone()));
+            }
         });
     (action, toolbar.min_rect())
+}
+
+fn toolbar_width(message: &DisplayMessage, context: &MessageContext<'_>) -> f32 {
+    let base = if context.allow_threads { 202.0 } else { 154.0 };
+    if can_edit(message, context) {
+        base + 44.0
+    } else {
+        base
+    }
+}
+
+/// Only the author's own messages, once Slack has them, and not while editing.
+fn can_edit(message: &DisplayMessage, context: &MessageContext<'_>) -> bool {
+    message.author_key == context.self_user_id
+        && context.outbox.delivery(message).is_none()
+        && context
+            .edit
+            .as_ref()
+            .is_none_or(|edit| edit.ts != message.ts)
+}
+
+fn edit_box(ui: &mut egui::Ui, edit: &mut MessageEdit) -> Option<MessageAction> {
+    let id = egui::Id::new(("message_edit", &edit.ts));
+    let mut action = None;
+    if ui.memory(|memory| memory.has_focus(id)) && !edit.saving {
+        let (submit, cancel) = ui.input_mut(|input| {
+            (
+                super::composer::consume_submit(&mut input.events, &mut edit.ime_active),
+                input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+            )
+        });
+        if cancel {
+            action = Some(MessageAction::CancelEdit);
+        } else if submit {
+            action = Some(MessageAction::SaveEdit);
+        }
+    }
+    if edit.focus {
+        edit.focus = false;
+        let mut state = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+        let end = egui::text::CCursor::new(edit.text.chars().count());
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(end)));
+        state.store(ui.ctx(), id);
+        ui.memory_mut(|memory| memory.request_focus(id));
+    }
+    egui::Frame::new()
+        .fill(theme::INPUT_BACKGROUND)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .corner_radius(2)
+        .inner_margin(8)
+        .show(ui, |ui| {
+            ui.add_enabled(
+                !edit.saving,
+                egui::TextEdit::multiline(&mut edit.text)
+                    .id(id)
+                    .desired_width(ui.available_width())
+                    .desired_rows(1)
+                    .frame(egui::Frame::NONE)
+                    .margin(egui::Margin::ZERO)
+                    .return_key(egui::KeyboardShortcut::new(
+                        egui::Modifiers::SHIFT,
+                        egui::Key::Enter,
+                    )),
+            );
+        });
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(!edit.saving, egui::Button::new("Cancel"))
+            .clicked()
+        {
+            action = Some(MessageAction::CancelEdit);
+        }
+        let label = if edit.saving { "Saving…" } else { "Save" };
+        if ui
+            .add_enabled(
+                !edit.saving && !edit.text.trim().is_empty(),
+                egui::Button::new(label),
+            )
+            .clicked()
+        {
+            action = Some(MessageAction::SaveEdit);
+        }
+        ui.label(
+            RichText::new("Escape to cancel · Enter to save")
+                .small()
+                .color(theme::TEXT_MUTED),
+        );
+    });
+    if let Some(error) = &edit.error {
+        ui.colored_label(theme::SELF_MENTION_TEXT, error);
+    }
+    action
+}
+
+/// A shared message or pasted message link, quoted as a card like Slack does.
+fn shared_card(
+    ui: &mut egui::Ui,
+    share: &DisplayShare,
+    context: &mut MessageContext<'_>,
+    offscreen: &egui::Ui,
+) -> bool {
+    let mut selecting = false;
+    ui.add_space(4.0);
+    egui::Frame::new()
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_max_width(ui.available_width().min(SHARE_MAX_WIDTH));
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                avatar_image(
+                    ui,
+                    share.avatar_url.as_deref(),
+                    &share.author,
+                    context.images,
+                    SHARE_AVATAR_SIZE,
+                );
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new(&share.author)
+                                .strong()
+                                .color(theme::TEXT_STRONG),
+                        );
+                        if let Some(ts) = &share.ts {
+                            let time = local_time(ts);
+                            let format = if time.date_naive() == Local::now().date_naive() {
+                                "%H:%M"
+                            } else {
+                                "%b %e at %H:%M"
+                            };
+                            ui.label(
+                                RichText::new(time.format(format).to_string())
+                                    .small()
+                                    .color(theme::TEXT_MUTED),
+                            )
+                            .on_hover_text(time.format("%A, %B %e, %Y at %H:%M:%S").to_string());
+                        }
+                    });
+                    if let Some(place) = &share.context {
+                        ui.label(RichText::new(place).small().color(theme::TEXT_MUTED));
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            selecting = render_blocks(
+                ui,
+                &share.blocks,
+                context.emoji,
+                context.images,
+                Some(offscreen),
+            );
+        });
+    selecting
 }
 
 fn quick_reaction_button(
@@ -522,29 +740,36 @@ fn quick_reaction_button(
 }
 
 pub(super) fn avatar(ui: &mut egui::Ui, message: &DisplayMessage, images: &mut ImageCache) {
-    let size = egui::vec2(AVATAR_SIZE, AVATAR_SIZE);
+    avatar_image(
+        ui,
+        message.avatar_url.as_deref(),
+        &message.author,
+        images,
+        AVATAR_SIZE,
+    );
+}
+
+fn avatar_image(
+    ui: &mut egui::Ui,
+    url: Option<&str>,
+    author: &str,
+    images: &mut ImageCache,
+    side: f32,
+) {
+    let size = egui::vec2(side, side);
     if !ui.is_rect_visible(egui::Rect::from_min_size(ui.next_widget_position(), size)) {
         ui.allocate_exact_size(size, egui::Sense::hover());
         return;
     }
-    if let Some(image) = message
-        .avatar_url
-        .as_deref()
-        .and_then(|url| images.image(url))
-    {
-        ui.add(
-            image
-                .fit_to_exact_size(egui::vec2(AVATAR_SIZE, AVATAR_SIZE))
-                .corner_radius(6),
-        )
-        .on_hover_text(&message.author);
+    let radius = 6.0 * side / AVATAR_SIZE;
+    if let Some(image) = url.and_then(|url| images.image(url)) {
+        ui.add(image.fit_to_exact_size(size).corner_radius(radius))
+            .on_hover_text(author);
         return;
     }
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(AVATAR_SIZE, AVATAR_SIZE), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 6.0, theme::ACCENT);
-    let initials: String = message
-        .author
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    ui.painter().rect_filled(rect, radius, theme::ACCENT);
+    let initials: String = author
         .split_whitespace()
         .take(2)
         .filter_map(|word| word.chars().next())
@@ -553,10 +778,10 @@ pub(super) fn avatar(ui: &mut egui::Ui, message: &DisplayMessage, images: &mut I
         rect.center(),
         egui::Align2::CENTER_CENTER,
         initials.to_uppercase(),
-        egui::FontId::proportional(14.0),
+        egui::FontId::proportional(14.0 * side / AVATAR_SIZE),
         theme::TEXT_STRONG,
     );
-    response.on_hover_text(&message.author);
+    response.on_hover_text(author);
 }
 
 pub fn emoji_button(
@@ -872,6 +1097,8 @@ fn local_time(ts: &str) -> DateTime<Local> {
 }
 
 const AVATAR_SIZE: f32 = 28.0;
+const SHARE_AVATAR_SIZE: f32 = 32.0;
+const SHARE_MAX_WIDTH: f32 = 720.0;
 const GROUP_WINDOW_SECONDS: f64 = 5.0 * 60.0;
 
 #[cfg(test)]
@@ -934,6 +1161,7 @@ mod tests {
                                 allow_threads,
                                 outbox: &outbox,
                                 new_after: None,
+                                edit: None,
                             },
                         )
                         .action;
@@ -1142,6 +1370,7 @@ mod tests {
                                     allow_threads: true,
                                     outbox: &Outbox::default(),
                                     new_after: None,
+                                    edit: None,
                                 },
                             );
                             crate::ui::rich_text::scroll_text_selection(ui, list.selecting);
@@ -1195,6 +1424,87 @@ mod tests {
     }
 
     #[test]
+    fn shared_messages_show_as_cards_and_own_messages_edit_in_place() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let service = Arc::new(ChatService::new(Arc::new(DemoGateway::new())));
+        let workspace = service.load_workspace().unwrap();
+        let mut message = service.messages("C1").unwrap().remove(0);
+        message.author_key = "me".into();
+        message.avatar_url = None;
+        message.attachments.clear();
+        message.blocks = vec![Block::Paragraph(vec![Inline::Text {
+            text: "original body".into(),
+            style: TextStyle::default(),
+        }])];
+        message.shares = vec![DisplayShare {
+            author: "Mart Bakler".into(),
+            avatar_url: None,
+            ts: Some(message.ts.clone()),
+            context: Some("Thread in #reflection-vend".into()),
+            blocks: vec![Block::Paragraph(vec![Inline::Text {
+                text: "Out of interest".into(),
+                style: TextStyle::default(),
+            }])],
+        }];
+        let mut images = ImageCache::new(service, ctx.clone());
+        let mut edit = MessageEdit::new(message.ts.clone(), "draft edit".into());
+        let mut texts = |editing: bool| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(700.0, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    message_list(
+                        ui,
+                        "share",
+                        std::slice::from_ref(&message),
+                        &mut MessageContext {
+                            emoji: &workspace.emoji,
+                            images: &mut images,
+                            self_user_id: "me",
+                            allow_threads: true,
+                            outbox: &Outbox::default(),
+                            new_after: None,
+                            edit: editing.then_some(&mut edit),
+                        },
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let shown = texts(false);
+        for expected in [
+            "original body",
+            "Mart Bakler",
+            "Thread in #reflection-vend",
+            "Out of interest",
+        ] {
+            assert!(shown.contains(expected), "{expected} missing from {shown}");
+        }
+        let editing = texts(true);
+        assert!(editing.contains("draft edit") && editing.contains("Enter to save"));
+        assert!(
+            !editing.contains("original body"),
+            "the editor replaces the body"
+        );
+        assert!(editing.contains("Out of interest"), "shares stay visible");
+    }
+
+    #[test]
     fn long_messages_fold_until_expanded() {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
@@ -1237,6 +1547,7 @@ mod tests {
                             allow_threads: true,
                             outbox: &Outbox::default(),
                             new_after: None,
+                            edit: None,
                         },
                     );
                     height = ui.min_rect().height();
@@ -1329,6 +1640,7 @@ mod tests {
                                     allow_threads: true,
                                     outbox: &Outbox::default(),
                                     new_after: None,
+                                    edit: None,
                                 },
                             )
                         })
@@ -1388,6 +1700,7 @@ mod tests {
                                 allow_threads: true,
                                 outbox: &Outbox::default(),
                                 new_after: None,
+                                edit: None,
                             },
                         );
                     });

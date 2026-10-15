@@ -5,10 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::application::emoji_catalog::EmojiCatalog;
 use crate::domain::gateway::SlackGateway;
-use crate::domain::message_text::{Block, NameLookup, parse_message_text};
+use crate::domain::message_text::{Block, EditableText, NameLookup, parse_message_text};
 use crate::domain::model::{
     Attachment, Author, Conversation, ConversationKind, Message, Reaction, ReadState,
-    SidebarSection, SlackError, UserProfile,
+    SharedMessage, SidebarSection, SlackError, UserProfile,
 };
 use crate::domain::sidebar::{SidebarGroup, SidebarInput, build_sidebar};
 
@@ -27,7 +27,22 @@ pub struct DisplayMessage {
     pub reply_count: u32,
     pub reactions: Vec<Reaction>,
     pub attachments: Vec<Attachment>,
+    #[serde(default)]
+    pub shares: Vec<DisplayShare>,
+    /// Slack markup of the body, kept so the author can edit it.
+    #[serde(default)]
+    pub text: String,
     pub edited: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DisplayShare {
+    pub author: String,
+    pub avatar_url: Option<String>,
+    pub ts: Option<String>,
+    /// Where the original was posted, e.g. "Thread in #general".
+    pub context: Option<String>,
+    pub blocks: Vec<Block>,
 }
 
 impl DisplayMessage {
@@ -363,7 +378,7 @@ impl ChatService {
             Author::User(id) | Author::Bot { id, .. } => Some(self.profile(id)),
             Author::Named(_) => None,
         };
-        display_message(message, profile, self)
+        display_message(message, profile, self, &|id| Some(self.profile(id)))
     }
 
     pub fn send(
@@ -430,8 +445,33 @@ impl ChatService {
             reply_count: 0,
             reactions: vec![],
             attachments: vec![],
+            shares: vec![],
+            text: text.into(),
             edited: false,
         }
+    }
+
+    pub fn editable_text(&self, raw: &str) -> EditableText {
+        EditableText::new(raw, &CachedNames(self))
+    }
+
+    pub fn edit_message(
+        &self,
+        conversation_id: &str,
+        ts: &str,
+        text: &str,
+    ) -> Result<(), SlackError> {
+        self.gateway.update_message(conversation_id, ts, text)
+    }
+
+    /// Show an accepted edit at once, using cached names only: no UI-thread I/O.
+    pub fn edited_message(&self, message: &DisplayMessage, text: &str) -> DisplayMessage {
+        let mut edited = message.clone();
+        edited.blocks = parse_message_text(text, &CachedNames(self));
+        edited.text = text.into();
+        edited.edited = true;
+        edited.update_layout_key();
+        edited
     }
 
     pub fn mark_read(&self, conversation_id: &str, ts: &str) -> Result<(), SlackError> {
@@ -509,7 +549,9 @@ impl ChatService {
                     }
                     Author::Named(_) => None,
                 };
-                display_message(message, profile, &CachedNames(self))
+                display_message(message, profile, &CachedNames(self), &|id| {
+                    lock(&self.profiles).get(id).cloned()
+                })
             })
             .collect()
     }
@@ -634,6 +676,12 @@ fn referenced_users(messages: &[Message]) -> Vec<String> {
             users.0.borrow_mut().insert(id.clone());
         }
         parse_message_text(&message.text, &users);
+        for share in &message.shares {
+            if let Author::User(id) = &share.author {
+                users.0.borrow_mut().insert(id.clone());
+            }
+            parse_message_text(&share.text, &users);
+        }
     }
     users.0.into_inner().into_iter().collect()
 }
@@ -642,6 +690,7 @@ fn display_message(
     message: &Message,
     profile: Option<UserProfile>,
     names: &dyn NameLookup,
+    profiles: &dyn Fn(&str) -> Option<UserProfile>,
 ) -> DisplayMessage {
     let (author_key, author, avatar_url) = match (&message.author, profile) {
         (Author::Named(name), _) => (name.clone(), name.clone(), None),
@@ -686,11 +735,73 @@ fn display_message(
         reply_count: message.reply_count,
         reactions: message.reactions.clone(),
         attachments: message.attachments.clone(),
+        shares: message
+            .shares
+            .iter()
+            .map(|share| display_share(share, names, profiles))
+            .collect(),
+        text: message.text.clone(),
         edited: message.edited,
     };
     // Resolved mention names can wrap differently even if the raw text is unchanged.
     display.update_layout_key();
     display
+}
+
+fn display_share(
+    share: &SharedMessage,
+    names: &dyn NameLookup,
+    profiles: &dyn Fn(&str) -> Option<UserProfile>,
+) -> DisplayShare {
+    let (author, avatar_url) = match &share.author {
+        Author::User(id) | Author::Bot { id, .. } => {
+            let profile = profiles(id).filter(|profile| profile.name != *id);
+            (
+                profile
+                    .as_ref()
+                    .map_or_else(|| id.clone(), |profile| profile.name.clone()),
+                share
+                    .avatar_url
+                    .clone()
+                    .or_else(|| profile.and_then(|profile| profile.avatar_url)),
+            )
+        }
+        Author::Named(name) => (name.clone(), share.avatar_url.clone()),
+    };
+    let channel = share
+        .channel_id
+        .as_deref()
+        .map(|id| (id, names.conversation_name(id)))
+        .filter(|(id, name)| id != name);
+    let context = match channel {
+        Some((id, name)) => {
+            let place = if id.starts_with('D') {
+                String::from("a direct message")
+            } else {
+                format!("#{name}")
+            };
+            Some(format!(
+                "{} in {place}",
+                if share.in_thread { "Thread" } else { "Posted" }
+            ))
+        }
+        None => share
+            .footer
+            .as_deref()
+            .map(|footer| plain_markup(footer, names))
+            .filter(|footer| !footer.is_empty()),
+    };
+    DisplayShare {
+        author,
+        avatar_url,
+        ts: share.ts.clone(),
+        context,
+        blocks: parse_message_text(&share.text, names),
+    }
+}
+
+fn plain_markup(raw: &str, names: &dyn NameLookup) -> String {
+    crate::domain::message_text::plain_text(&parse_message_text(raw, names))
 }
 
 impl NameLookup for ChatService {

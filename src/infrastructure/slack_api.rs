@@ -640,6 +640,23 @@ impl SlackGateway for SlackHttpGateway {
             .ok_or_else(|| SlackError("Slack accepted the request but returned no message timestamp; check the conversation before retrying.".into()))
     }
 
+    fn update_message(
+        &self,
+        conversation_id: &str,
+        ts: &str,
+        text: &str,
+    ) -> Result<(), SlackError> {
+        let params = [("channel", conversation_id), ("ts", ts), ("text", text)];
+        // Without an empty block list Slack keeps showing the old rich-text blocks.
+        let cleared = [params.as_slice(), &[("blocks", "[]")]].concat();
+        match self.call("chat.update", &cleared) {
+            Err(error) if error.0.ends_with("invalid_blocks") => {
+                self.call("chat.update", &params).map(|_| ())
+            }
+            result => result.map(|_| ()),
+        }
+    }
+
     fn mark_read(&self, conversation_id: &str, ts: &str) -> Result<(), SlackError> {
         self.call(
             "conversations.mark",

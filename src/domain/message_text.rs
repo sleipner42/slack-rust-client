@@ -348,6 +348,102 @@ fn parse_token(token: &str, names: &dyn NameLookup) -> Inline {
     }
 }
 
+/// Slack markup made readable for editing: mentions show as names and entities
+/// are unescaped. `restore` turns the edited text back into Slack markup.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EditableText {
+    pub text: String,
+    /// Visible label and the markup it stands for, longest label first.
+    tokens: Vec<(String, String)>,
+}
+
+impl EditableText {
+    pub fn new(raw: &str, names: &dyn NameLookup) -> Self {
+        let mut text = String::new();
+        let mut tokens: Vec<(String, String)> = Vec::new();
+        let mut rest = raw;
+        while let Some(start) = rest.find('<') {
+            let Some(length) = rest[start..].find('>') else {
+                break;
+            };
+            text.push_str(&unescape(&rest[..start]));
+            let markup = &rest[start..start + length + 1];
+            let token = &markup[1..markup.len() - 1];
+            match editable_label(token, names) {
+                // Bare links are linked again by Slack; nothing to restore.
+                Some(EditLabel::Plain(url)) => text.push_str(&url),
+                Some(EditLabel::Token(label)) => {
+                    if !tokens.iter().any(|(existing, _)| *existing == label) {
+                        tokens.push((label.clone(), markup.into()));
+                    }
+                    text.push_str(&label);
+                }
+                None => {
+                    if !tokens.iter().any(|(existing, _)| existing == markup) {
+                        tokens.push((markup.into(), markup.into()));
+                    }
+                    text.push_str(markup);
+                }
+            }
+            rest = &rest[start + length + 1..];
+        }
+        text.push_str(&unescape(rest));
+        tokens.sort_by_key(|(label, _)| std::cmp::Reverse(label.len()));
+        Self { text, tokens }
+    }
+
+    pub fn restore(&self, edited: &str) -> String {
+        let mut markup = String::with_capacity(edited.len());
+        let mut rest = edited;
+        'outer: while let Some(next) = rest.chars().next() {
+            for (label, token) in &self.tokens {
+                if let Some(after) = rest.strip_prefix(label.as_str())
+                    && !after
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                {
+                    markup.push_str(token);
+                    rest = after;
+                    continue 'outer;
+                }
+            }
+            match next {
+                '&' => markup.push_str("&amp;"),
+                '<' => markup.push_str("&lt;"),
+                '>' => markup.push_str("&gt;"),
+                c => markup.push(c),
+            }
+            rest = &rest[next.len_utf8()..];
+        }
+        markup
+    }
+}
+
+enum EditLabel {
+    Plain(String),
+    Token(String),
+}
+
+fn editable_label(token: &str, names: &dyn NameLookup) -> Option<EditLabel> {
+    let (target, label) = match token.split_once('|') {
+        Some((target, label)) => (target, Some(label)),
+        None => (token, None),
+    };
+    if target.starts_with('@') || target.starts_with('#') || target.starts_with('!') {
+        return match parse_token(token, names) {
+            Inline::Mention { label, .. } => Some(EditLabel::Token(label)),
+            _ => None,
+        };
+    }
+    let url = unescape(target);
+    (["https://", "http://"]
+        .iter()
+        .any(|scheme| url.starts_with(scheme))
+        && label.is_none_or(|label| unescape(label) == url))
+    .then_some(EditLabel::Plain(url))
+}
+
 fn special_mention(special: &str, label: Option<&str>) -> String {
     if let Some(label) = label {
         return label.to_string();
@@ -529,6 +625,28 @@ mod tests {
                 Inline::Emoji("thumbsup::skin-tone-2".into()),
                 text(" at 10:30:00")
             ])]
+        );
+    }
+
+    #[test]
+    fn editable_text_shows_names_and_restores_markup() {
+        let raw = "<@U1> see <#C2> &amp; <https://a.test/x?a=1&amp;b=2> or <https://b.test|docs>, a &lt; b <!here>";
+        let editable = EditableText::new(raw, &Names);
+        assert_eq!(
+            editable.text,
+            "@name-U1 see #chan-C2 & https://a.test/x?a=1&b=2 or <https://b.test|docs>, a < b @here"
+        );
+        // Bare links go back as plain URLs, which Slack links again.
+        assert_eq!(
+            editable.restore(&editable.text),
+            raw.replace(
+                "<https://a.test/x?a=1&amp;b=2>",
+                "https://a.test/x?a=1&amp;b=2"
+            )
+        );
+        assert_eq!(
+            editable.restore("@name-U1x and @name-U1, 1 > 0"),
+            "@name-U1x and <@U1>, 1 &gt; 0"
         );
     }
 

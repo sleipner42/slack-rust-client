@@ -372,6 +372,22 @@ impl SlackGateway for DemoGateway {
         }
         Ok(ts)
     }
+    fn update_message(
+        &self,
+        conversation_id: &str,
+        ts: &str,
+        text: &str,
+    ) -> Result<(), SlackError> {
+        let mut messages = self.messages.lock().unwrap();
+        let message = messages
+            .get_mut(conversation_id)
+            .and_then(|messages| messages.iter_mut().find(|message| message.ts == ts))
+            .ok_or_else(|| SlackError("chat.update failed: message_not_found".into()))?;
+        message.text = text.into();
+        message.edited = true;
+        Ok(())
+    }
+
     fn mark_read(&self, conversation_id: &str, ts: &str) -> Result<(), SlackError> {
         record_read(
             self.states
@@ -468,6 +484,7 @@ fn message(ts: String, author: &str, text: &str) -> Message {
         reply_count: 0,
         reactions: Vec::new(),
         attachments: Vec::new(),
+        shares: Vec::new(),
         edited: false,
     }
 }

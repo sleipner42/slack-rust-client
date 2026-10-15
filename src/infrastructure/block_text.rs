@@ -11,9 +11,8 @@ pub fn message_text(message: &Value) -> String {
     let mut parts = vec![primary];
     for attachment in message["attachments"].as_array().into_iter().flatten() {
         // URL unfurls already have their own preview; don't repeat the linked page.
-        if attachment["is_msg_unfurl"].as_bool() == Some(true)
-            || attachment["is_app_unfurl"].as_bool() == Some(true)
-        {
+        // Shared messages are shown as their own quoted card.
+        if attachment["is_app_unfurl"].as_bool() == Some(true) || is_shared_message(attachment) {
             continue;
         }
         let mut detail = Vec::new();
@@ -57,6 +56,29 @@ pub fn message_text(message: &Value) -> String {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+pub fn is_shared_message(attachment: &Value) -> bool {
+    attachment["is_msg_unfurl"].as_bool() == Some(true)
+        || attachment["is_share"].as_bool() == Some(true)
+        || attachment["message_blocks"].is_array()
+}
+
+/// The visible text of a shared message, preferring its original blocks.
+pub fn shared_text(attachment: &Value) -> String {
+    let blocks = attachment["message_blocks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|entry| block_text(&entry["message"]["blocks"]))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if blocks.is_empty() {
+        attachment["text"].as_str().unwrap_or("").to_owned()
+    } else {
+        blocks
+    }
 }
 
 fn block_text(blocks: &Value) -> String {

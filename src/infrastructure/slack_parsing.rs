@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::domain::model::{
     Attachment, Author, Conversation, ConversationKind, LiveEvent, Message, Reaction, ReadState,
-    SavedTodo, SavedTodoPage, SectionKind, SidebarSection, SlackError, UserProfile,
+    SavedTodo, SavedTodoPage, SectionKind, SharedMessage, SidebarSection, SlackError, UserProfile,
 };
 
 pub fn parse_saved_todos(body: &Value, completed: bool) -> Result<SavedTodoPage, SlackError> {
@@ -77,8 +77,42 @@ pub fn parse_message(item: &Value) -> Option<Message> {
                     .map(parse_attachment),
             )
             .collect(),
+        shares: item["attachments"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|attachment| super::block_text::is_shared_message(attachment))
+            .map(parse_share)
+            .collect(),
         edited: item["edited"].is_object(),
     })
+}
+
+fn parse_share(attachment: &Value) -> SharedMessage {
+    let name = ["author_name", "author_subname"]
+        .iter()
+        .find_map(|key| attachment[*key].as_str().filter(|name| !name.is_empty()));
+    let author = match attachment["author_id"].as_str().filter(|id| !id.is_empty()) {
+        Some(id) => Author::User(id.into()),
+        None => Author::Named(name.unwrap_or("Shared message").into()),
+    };
+    let channel_id = attachment["channel_id"]
+        .as_str()
+        .or(attachment["message_blocks"][0]["channel"].as_str())
+        .map(str::to_owned);
+    SharedMessage {
+        author,
+        avatar_url: attachment["author_icon"].as_str().map(str::to_owned),
+        ts: attachment["ts"]
+            .as_str()
+            .or(attachment["message_blocks"][0]["ts"].as_str())
+            .map(str::to_owned),
+        channel_id,
+        in_thread: attachment["is_reply_unfurl"].as_bool() == Some(true)
+            || attachment["is_thread_root_unfurl"].as_bool() == Some(true),
+        footer: attachment["footer"].as_str().map(str::to_owned),
+        text: super::block_text::shared_text(attachment),
+    }
 }
 
 pub fn parse_live_event(event: &Value) -> Option<LiveEvent> {
@@ -485,6 +519,40 @@ mod tests {
                 .all(|attachment| attachment.preview_url.is_some())
         );
         assert_eq!(message.attachments[2].height, Some(600));
+    }
+
+    #[test]
+    fn shared_messages_become_cards_instead_of_vanishing() {
+        let message = parse_message(&json!({
+            "ts": "2.0", "user": "U1", "text": "",
+            "attachments": [{
+                "is_msg_unfurl": true, "is_reply_unfurl": true, "is_share": true,
+                "author_id": "U2", "author_name": "Mart Bakler",
+                "author_icon": "https://example.test/mart.png",
+                "channel_id": "C9", "ts": "1.5",
+                "text": "flat <@U3> fallback",
+                "message_blocks": [{"channel": "C9", "ts": "1.5", "message": {"blocks": [
+                    {"type": "rich_text", "elements": [{"type": "rich_text_section", "elements": [
+                        {"type": "user", "user_id": "U3"},
+                        {"type": "text", "text": " Out of interest"}
+                    ]}]}
+                ]}}]
+            }]
+        }))
+        .unwrap();
+        assert_eq!(message.text, "", "the share is not repeated as body text");
+        assert_eq!(
+            message.shares,
+            vec![SharedMessage {
+                author: Author::User("U2".into()),
+                avatar_url: Some("https://example.test/mart.png".into()),
+                ts: Some("1.5".into()),
+                channel_id: Some("C9".into()),
+                in_thread: true,
+                footer: None,
+                text: "<@U3> Out of interest".into(),
+            }]
+        );
     }
 
     #[test]

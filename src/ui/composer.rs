@@ -86,7 +86,7 @@ fn can_send(draft: &Draft) -> bool {
 }
 
 // Only plain Enter submits. IME confirmation and key-repeat must never send a message.
-fn consume_submit(events: &mut Vec<egui::Event>, ime_active: &mut bool) -> bool {
+pub(super) fn consume_submit(events: &mut Vec<egui::Event>, ime_active: &mut bool) -> bool {
     let mut submit = false;
     let ime_frame = *ime_active
         || events

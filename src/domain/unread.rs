@@ -66,6 +66,7 @@ mod tests {
             reply_count: 0,
             reactions: Vec::new(),
             attachments: Vec::new(),
+            shares: Vec::new(),
             edited: false,
         }
     }

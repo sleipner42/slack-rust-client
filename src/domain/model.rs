@@ -94,7 +94,21 @@ pub struct Message {
     pub reply_count: u32,
     pub reactions: Vec<Reaction>,
     pub attachments: Vec<Attachment>,
+    pub shares: Vec<SharedMessage>,
     pub edited: bool,
+}
+
+/// A message shared into another one, or unfurled from a pasted message link.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SharedMessage {
+    pub author: Author,
+    pub avatar_url: Option<String>,
+    pub ts: Option<String>,
+    pub channel_id: Option<String>,
+    pub in_thread: bool,
+    /// Slack's own "Thread in #channel" style caption, used when the channel is unknown.
+    pub footer: Option<String>,
+    pub text: String,
 }
 
 impl Message {

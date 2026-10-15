@@ -20,7 +20,9 @@ use crate::ui::emoji_picker::{EmojiPicker, PickerOutcome};
 use crate::ui::image_viewer::ImageViewer;
 use crate::ui::images::ImageCache;
 use crate::ui::labels::{conversation_label, paint_sidebar_icon};
-use crate::ui::message_view::{MessageAction, MessageContext, loading_messages, message_list};
+use crate::ui::message_view::{
+    MessageAction, MessageContext, MessageEdit, loading_messages, message_list,
+};
 use crate::ui::outbox::{Outbox, SendRequest};
 use crate::ui::quick_switcher::{QuickSwitcher, SwitcherOutcome};
 use crate::ui::theme;
@@ -92,6 +94,8 @@ struct ChatApp {
     send_requests: Sender<SendRequest>,
     scroll_after_send: HashSet<ComposeTarget>,
     thread: Option<ThreadView>,
+    /// The own message being edited, and the timeline it is shown in.
+    editing: Option<(ComposeTarget, MessageEdit)>,
     images: ImageCache,
     status: Option<String>,
     message_error: Option<String>,
@@ -119,6 +123,12 @@ enum UiEvent {
     MessagesCached(ComposeTarget, Vec<DisplayMessage>),
     MessagesPreview(ComposeTarget, Vec<DisplayMessage>),
     MessageSent(SendRequest, Result<String, SlackError>),
+    MessageEdited {
+        list: ComposeTarget,
+        ts: String,
+        text: String,
+        result: Result<(), SlackError>,
+    },
     ReactionSet {
         conversation_id: String,
         ts: String,
@@ -330,6 +340,7 @@ impl ChatApp {
             workspace: None,
             selected: None,
             new_after: None,
+            editing: None,
             back: Vec::new(),
             forward: Vec::new(),
             messages: Vec::new(),
@@ -737,6 +748,11 @@ impl ChatApp {
                                     allow_threads: true,
                                     outbox: &self.outbox,
                                     new_after: self.new_after.as_deref(),
+                                    edit: self
+                                        .editing
+                                        .as_mut()
+                                        .filter(|(list, _)| *list == target)
+                                        .map(|(_, edit)| edit),
                                 },
                             );
                             if self.scroll_after_send.remove(&target) {
@@ -756,7 +772,7 @@ impl ChatApp {
             return;
         };
         if let Some(action) = output.inner.action {
-            self.message_action(conversation.id.clone(), action);
+            self.message_action(target, action);
         }
         let at_bottom =
             output.state.offset.y + output.inner_rect.height() >= output.content_size.y - 4.0;
@@ -908,6 +924,11 @@ impl ChatApp {
                                 allow_threads: false,
                                 outbox: &self.outbox,
                                 new_after: None,
+                                edit: self
+                                    .editing
+                                    .as_mut()
+                                    .filter(|(list, _)| *list == target)
+                                    .map(|(_, edit)| edit),
                             },
                         );
                         if self.scroll_after_send.remove(&target) {
@@ -927,11 +948,20 @@ impl ChatApp {
             self.load_messages(target.clone());
         }
         if let Some(action) = action {
-            self.message_action(target.conversation_id, action);
+            self.message_action(target, action);
         }
     }
 
     fn compose(&mut self, ui: &mut egui::Ui, target: &ComposeTarget, hint: &str) {
+        let draft = self.drafts.entry(target.clone()).or_default();
+        if draft.text.is_empty()
+            && draft.attachments.is_empty()
+            && ui.is_enabled()
+            && ui.memory(|memory| memory.has_focus(target.editor_id()))
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp))
+        {
+            self.edit_latest(target);
+        }
         let draft = self.drafts.entry(target.clone()).or_default();
         if self.composer_focus.as_ref() == Some(target) && ui.is_enabled() {
             // Modal interaction is cleared at the end of the closing pass. Wait for
@@ -1087,8 +1117,15 @@ impl ChatApp {
         self.selected = Some(conversation);
     }
 
-    fn message_action(&mut self, conversation_id: String, action: MessageAction) {
+    fn message_action(&mut self, list: ComposeTarget, action: MessageAction) {
+        let conversation_id = list.conversation_id.clone();
         match action {
+            MessageAction::Edit(ts) => self.start_edit(list, &ts),
+            MessageAction::CancelEdit => {
+                self.editing = None;
+                self.composer_focus = Some(list);
+            }
+            MessageAction::SaveEdit => self.save_edit(),
             MessageAction::RetrySend(id) => {
                 if let Some(request) = self.outbox.retry(&id) {
                     self.dispatch_send(request);
@@ -1127,6 +1164,128 @@ impl ChatApp {
                 self.set_reaction(conversation_id, ts, name, add)
             }
         }
+    }
+
+    fn list_messages(&self, list: &ComposeTarget) -> &[DisplayMessage] {
+        match &self.thread {
+            Some(thread) if list.thread_ts.is_some() && thread.target == *list => &thread.messages,
+            _ if list.thread_ts.is_none() && self.is_selected(&list.conversation_id) => {
+                &self.messages
+            }
+            _ => &[],
+        }
+    }
+
+    fn start_edit(&mut self, list: ComposeTarget, ts: &str) {
+        let Some(message) = self
+            .list_messages(&list)
+            .iter()
+            .find(|message| message.ts == ts)
+        else {
+            return;
+        };
+        let text = if message.text.is_empty() {
+            // Rows cached before source text was stored; refreshed rows have it.
+            crate::domain::message_text::plain_text(&message.blocks)
+        } else {
+            self.service.editable_text(&message.text).text
+        };
+        self.editing = Some((list, MessageEdit::new(ts.into(), text)));
+    }
+
+    /// Up in an empty composer edits your latest message, as in Slack.
+    fn edit_latest(&mut self, list: &ComposeTarget) {
+        let Some(self_id) = self.workspace.as_ref().map(|w| w.self_user_id.clone()) else {
+            return;
+        };
+        if let Some(ts) = self
+            .list_messages(list)
+            .iter()
+            .rev()
+            .find(|message| message.author_key == self_id)
+            .map(|message| message.ts.clone())
+        {
+            self.start_edit(list.clone(), &ts);
+        }
+    }
+
+    fn save_edit(&mut self) {
+        let Some((list, ts)) = self
+            .editing
+            .as_ref()
+            .map(|(list, edit)| (list.clone(), edit.ts.clone()))
+        else {
+            return;
+        };
+        let Some(original) = self
+            .list_messages(&list)
+            .iter()
+            .find(|message| message.ts == ts)
+            .map(|message| message.text.clone())
+        else {
+            self.editing = None;
+            return;
+        };
+        let Some((_, edit)) = &mut self.editing else {
+            return;
+        };
+        let editable = self.service.editable_text(&original);
+        let text = editable.restore(&edit.text);
+        if edit.text == editable.text || text == original {
+            self.editing = None;
+            self.composer_focus = Some(list);
+            return;
+        }
+        edit.saving = true;
+        edit.error = None;
+        self.spawn(move |service| UiEvent::MessageEdited {
+            result: service.edit_message(&list.conversation_id, &ts, &text),
+            list,
+            ts,
+            text,
+        });
+    }
+
+    fn finish_edit(
+        &mut self,
+        list: ComposeTarget,
+        ts: String,
+        text: String,
+        result: Result<(), SlackError>,
+    ) {
+        let current = self
+            .editing
+            .as_mut()
+            .filter(|(editing, edit)| *editing == list && edit.ts == ts);
+        if let Err(error) = result {
+            if let Some((_, edit)) = current {
+                edit.saving = false;
+                edit.error = Some(error.to_string());
+            } else {
+                self.status = Some(format!("Could not edit the message: {error}"));
+            }
+            return;
+        }
+        if current.is_some() {
+            self.editing = None;
+            self.composer_focus = Some(list.clone());
+        }
+        // Show the edit now; the refresh below brings Slack's rendering.
+        let service = Arc::clone(&self.service);
+        let lists = [
+            (list.thread_ts.is_none() && self.is_selected(&list.conversation_id))
+                .then_some(&mut self.messages),
+            self.thread
+                .as_mut()
+                .filter(|thread| thread.target.conversation_id == list.conversation_id)
+                .map(|thread| &mut thread.messages),
+        ];
+        for messages in lists.into_iter().flatten() {
+            if let Some(message) = messages.iter_mut().find(|message| message.ts == ts) {
+                *message = service.edited_message(message, &text);
+            }
+        }
+        self.refresh_conversation(&list.conversation_id);
     }
 
     fn set_reaction(&mut self, conversation_id: String, ts: String, name: String, add: bool) {
@@ -1301,6 +1460,12 @@ impl ChatApp {
                     self.outbox.finish(&request.id, result);
                     self.refresh_conversation(&request.target.conversation_id);
                 }
+                UiEvent::MessageEdited {
+                    list,
+                    ts,
+                    text,
+                    result,
+                } => self.finish_edit(list, ts, text, result),
                 UiEvent::ReactionSet {
                     conversation_id,
                     ts,
@@ -1703,6 +1868,50 @@ mod tests {
             conversation_id: id.into(),
             thread_ts: None,
         }
+    }
+
+    #[test]
+    fn up_in_an_empty_composer_edits_the_latest_own_message() {
+        let mut app = app();
+        let ctx = app.ctx.clone();
+        let target = target("C1");
+        app.selected = Some(conversation(&app, "C1"));
+        app.service
+            .send("C1", "hello & bye", None, "edit-test")
+            .unwrap();
+        app.messages = app.service.messages("C1").unwrap();
+        ctx.memory_mut(|memory| memory.request_focus(target.editor_id()));
+        let up = egui::Event::Key {
+            key: egui::Key::ArrowUp,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![up],
+                focused: true,
+                ..Default::default()
+            },
+            |ui| app.compose(ui, &target, "Message"),
+        );
+        output.textures_delta.clear();
+        let (list, edit) = app.editing.as_mut().expect("editing the latest message");
+        assert_eq!(*list, target);
+        assert_eq!(edit.text, "hello & bye");
+        edit.text = "hello & goodbye".into();
+        app.message_action(target.clone(), MessageAction::SaveEdit);
+        assert!(app.editing.as_ref().is_some_and(|(_, edit)| edit.saving));
+        let event = app.receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        app.sender.send(event).unwrap();
+        app.drain_events();
+        assert!(app.editing.is_none());
+        let shown = app.messages.last().unwrap();
+        assert!(shown.edited);
+        assert_eq!(shown.text, "hello &amp; goodbye");
+        let stored = app.service.messages("C1").unwrap();
+        assert_eq!(stored.last().unwrap().text, "hello &amp; goodbye");
     }
 
     #[test]
