@@ -178,6 +178,7 @@ mod tests {
             width: None,
             height: None,
             preview_pending: false,
+            video: false,
         });
         let mut outbox = Outbox::default();
         outbox.insert(request.clone(), message.clone());

@@ -62,6 +62,7 @@ impl DemoGateway {
             width: Some(640),
             height: Some(240),
             preview_pending: false,
+            video: false,
         });
         let mut reply1 = message(
             ts(-450),

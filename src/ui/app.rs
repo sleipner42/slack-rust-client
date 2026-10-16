@@ -130,6 +130,7 @@ enum UiEvent {
     MessagesPreview(ComposeTarget, Vec<DisplayMessage>),
     MessageSent(SendRequest, Result<String, SlackError>),
     Downloaded(String, Result<std::path::PathBuf, SlackError>),
+    VideoOpened(crate::domain::model::Attachment, Result<(), SlackError>),
     ImageCopied(Result<egui::ColorImage, SlackError>),
     OpenFromNotification {
         conversation_id: String,
@@ -849,7 +850,7 @@ impl ChatApp {
                 todos.show_details(ui, &workspace.emoji, &mut self.images)
         {
             match click {
-                AttachmentClick::View => self.image_viewer = Some(ImageViewer::new(attachment)),
+                AttachmentClick::View => self.view_attachment(attachment),
                 AttachmentClick::Download => self.download(attachment),
                 AttachmentClick::CopyImage => self.copy_image(attachment),
             }
@@ -1064,6 +1065,7 @@ impl ChatApp {
                 width: None,
                 height: None,
                 preview_pending: false,
+                video: false,
             })
             .collect();
         let request = SendRequest {
@@ -1247,9 +1249,7 @@ impl ChatApp {
             }
             MessageAction::Download(attachment) => self.download(attachment),
             MessageAction::CopyImage(attachment) => self.copy_image(attachment),
-            MessageAction::OpenImage(attachment) => {
-                self.image_viewer = Some(ImageViewer::new(attachment));
-            }
+            MessageAction::OpenImage(attachment) => self.view_attachment(attachment),
             MessageAction::PickReaction(ts) => {
                 self.picker = Some(EmojiPicker::new(conversation_id, ts))
             }
@@ -1257,6 +1257,42 @@ impl ChatApp {
                 self.set_reaction(conversation_id, ts, name, add)
             }
         }
+    }
+
+    fn view_attachment(&mut self, attachment: crate::domain::model::Attachment) {
+        if attachment.video {
+            self.play_video(attachment);
+        } else {
+            self.image_viewer = Some(ImageViewer::new(attachment));
+        }
+    }
+
+    /// Fetch a video once and hand it to the system's default video player.
+    fn play_video(&mut self, attachment: crate::domain::model::Attachment) {
+        let Some(url) = attachment.full_url.clone() else {
+            return;
+        };
+        let opening = crate::ui::message_view::video_opening_id(&attachment);
+        if self
+            .ctx
+            .data(|data| data.get_temp::<bool>(opening))
+            .is_some()
+        {
+            return;
+        }
+        self.ctx.data_mut(|data| data.insert_temp(opening, true));
+        self.spawn(move |service| {
+            let key = attachment.file_id.clone().unwrap_or_else(|| url.clone());
+            let result = crate::infrastructure::downloads::video_path(&key, &attachment.name)
+                .and_then(|path| {
+                    if !path.exists() {
+                        let bytes = service.download_file(&url)?;
+                        crate::infrastructure::downloads::keep_video(&path, &bytes)?;
+                    }
+                    crate::infrastructure::downloads::open_with_default_app(&path)
+                });
+            UiEvent::VideoOpened(attachment, result)
+        });
     }
 
     fn download(&mut self, attachment: crate::domain::model::Attachment) {
@@ -1630,6 +1666,13 @@ impl ChatApp {
                     ),
                     Err(error) => notify(&format!("Could not download {name}: {error}")),
                 },
+                UiEvent::VideoOpened(attachment, result) => {
+                    let opening = crate::ui::message_view::video_opening_id(&attachment);
+                    self.ctx.data_mut(|data| data.remove_temp::<bool>(opening));
+                    if let Err(error) = result {
+                        notify(&format!("Could not play {}: {error}", attachment.name));
+                    }
+                }
                 UiEvent::OpenFromNotification {
                     conversation_id,
                     thread_ts,

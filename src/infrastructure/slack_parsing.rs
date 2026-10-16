@@ -445,9 +445,16 @@ pub fn parse_attachment(item: &Value) -> Attachment {
         || ["png", "jpg", "jpeg", "gif", "webp"]
             .iter()
             .any(|extension| name.to_lowercase().ends_with(&format!(".{extension}")));
-    let preview = PREVIEW_KEYS
-        .iter()
-        .find_map(|key| item[*key].as_str().filter(|value| !value.is_empty()));
+    let video = item["mimetype"]
+        .as_str()
+        .is_some_and(|mime| mime.starts_with("video/"))
+        || VIDEO_EXTENSIONS
+            .iter()
+            .any(|extension| name.to_lowercase().ends_with(&format!(".{extension}")));
+    let preview = std::iter::once("thumb_video")
+        .filter(|_| video)
+        .chain(PREVIEW_KEYS)
+        .find_map(|key| item[key].as_str().filter(|value| !value.is_empty()));
     let full = item["url_private"]
         .as_str()
         .or(item["url_private_download"].as_str())
@@ -465,13 +472,16 @@ pub fn parse_attachment(item: &Value) -> Attachment {
             .map(str::to_string),
         width: item["original_w"]
             .as_u64()
+            .or(item["thumb_video_w"].as_u64())
             .or(item["image_width"].as_u64())
             .map(|w| w as u32),
         height: item["original_h"]
             .as_u64()
+            .or(item["thumb_video_h"].as_u64())
             .or(item["image_height"].as_u64())
             .map(|h| h as u32),
         preview_pending: false,
+        video,
     }
 }
 
@@ -486,6 +496,7 @@ const GROUP_NAME_PREFIX: &str = "mpdm-";
 const COUNT_GROUPS: [&str; 3] = ["channels", "mpims", "ims"];
 const ALIAS_PREFIX: &str = "alias:";
 const MAX_ALIAS_DEPTH: usize = 4;
+const VIDEO_EXTENSIONS: [&str; 5] = ["mp4", "mov", "m4v", "webm", "mkv"];
 const PREVIEW_KEYS: [&str; 9] = [
     "thumb_720",
     "thumb_480",
@@ -510,6 +521,25 @@ const HIDDEN_SUBTYPES: [&str; 6] = [
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn videos_use_their_still_frame_and_play_the_original() {
+        let video = parse_attachment(&json!({
+            "id": "F1",
+            "name": "Rendered video.mp4",
+            "mimetype": "video/mp4",
+            "url_private": "https://files.slack.com/files-pri/T1-F1/rendered_video.mp4",
+            "thumb_video": "https://files.slack.com/files-tmb/T1-F1/rendered_video_thumb_video.jpeg",
+            "thumb_video_w": 1280,
+            "thumb_video_h": 720,
+        }));
+        assert!(video.video);
+        assert!(video.preview_url.unwrap().ends_with("thumb_video.jpeg"));
+        assert!(video.full_url.unwrap().ends_with(".mp4"));
+        assert_eq!((video.width, video.height), (Some(1280), Some(720)));
+        let image = parse_attachment(&json!({"name": "a.png", "mimetype": "image/png"}));
+        assert!(!image.video);
+    }
 
     #[test]
     fn image_files_and_embedded_previews_keep_their_dimensions() {

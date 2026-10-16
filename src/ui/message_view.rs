@@ -1011,7 +1011,7 @@ pub(super) fn image_menu(
 ) -> Option<AttachmentClick> {
     let mut click = None;
     response.context_menu(|ui| {
-        if ui.button("Copy image").clicked() {
+        if !attachment.video && ui.button("Copy image").clicked() {
             click = Some(AttachmentClick::CopyImage);
             ui.close();
         }
@@ -1049,7 +1049,12 @@ pub(super) fn attachment_view(
             .unwrap_or(&attachment.name),
     ));
     let previous_size = ui.ctx().data(|data| data.get_temp::<egui::Vec2>(slot_id));
-    if attachment.preview_url.is_some() || attachment.preview_pending || previous_size.is_some() {
+    let playable = attachment.video && attachment.full_url.is_some();
+    if attachment.preview_url.is_some()
+        || attachment.preview_pending
+        || previous_size.is_some()
+        || playable
+    {
         // Keep the initial slot's aspect ratio when missing metadata arrives.
         // The image fits inside it; resizing the window still scales the slot.
         let native_size =
@@ -1064,13 +1069,19 @@ pub(super) fn attachment_view(
             .min(max_size.y / native_size.y)
             .min(1.0);
         let size = native_size * scale;
-        let sense = if attachment.preview_url.is_some() {
+        let sense = if attachment.preview_url.is_some() || playable {
             egui::Sense::click()
         } else {
             egui::Sense::hover()
         };
         let (rect, response) = ui.allocate_exact_size(size, sense);
-        if attachment.preview_url.is_some() {
+        if playable {
+            menu = image_menu(&response, attachment);
+            open = response
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("Play video")
+                .clicked();
+        } else if attachment.preview_url.is_some() {
             menu = image_menu(&response, attachment);
             open = response
                 .on_hover_cursor(egui::CursorIcon::ZoomIn)
@@ -1092,6 +1103,7 @@ pub(super) fn attachment_view(
             } else {
                 ui.painter().rect_filled(rect, 4.0, theme::SURFACE);
                 let label = match attachment.preview_url.as_deref() {
+                    _ if playable => "",
                     Some(url) if images.failed(url) => "Image unavailable · click to retry",
                     None if !attachment.preview_pending => "Image unavailable",
                     _ => "Loading image…",
@@ -1107,10 +1119,18 @@ pub(super) fn attachment_view(
                     images.retry(url);
                 }
             }
+            if playable {
+                play_badge(ui, rect.center(), video_opening(ui.ctx(), attachment));
+            }
         }
     }
 
-    if attachment.preview_url.is_some() {
+    if playable {
+        open |= ui
+            .link(RichText::new(&attachment.name).small())
+            .on_hover_text("Play video")
+            .clicked();
+    } else if attachment.preview_url.is_some() {
         open |= ui.link(RichText::new(&attachment.name).small()).clicked();
     } else if attachment.full_url.is_some() {
         // Slack's file page only redirects to the desktop app; fetch the file itself.
@@ -1127,6 +1147,52 @@ pub(super) fn attachment_view(
         ui.weak(RichText::new(&attachment.name).small());
     }
     menu.or(open.then_some(AttachmentClick::View))
+}
+
+/// A round play button over a video's still frame; a spinner while it opens.
+fn play_badge(ui: &egui::Ui, center: egui::Pos2, opening: bool) {
+    let painter = ui.painter();
+    painter.circle_filled(center, 24.0, egui::Color32::from_black_alpha(170));
+    if opening {
+        let angle = ui.input(|input| input.time) as f32 * 6.0;
+        let points: Vec<_> = (0..=20)
+            .map(|step| {
+                let a = angle + step as f32 / 20.0 * std::f32::consts::PI * 1.5;
+                center + 11.0 * egui::vec2(a.cos(), a.sin())
+            })
+            .collect();
+        painter.add(egui::Shape::line(
+            points,
+            egui::Stroke::new(2.5, egui::Color32::WHITE),
+        ));
+        ui.ctx().request_repaint();
+    } else {
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                center + egui::vec2(-7.0, -11.0),
+                center + egui::vec2(12.0, 0.0),
+                center + egui::vec2(-7.0, 11.0),
+            ],
+            egui::Color32::WHITE,
+            egui::Stroke::NONE,
+        ));
+    }
+}
+
+/// Whether a video is being fetched for the player; set by the app.
+pub(super) fn video_opening(ctx: &egui::Context, attachment: &Attachment) -> bool {
+    ctx.data(|data| data.get_temp::<bool>(video_opening_id(attachment)))
+        .unwrap_or(false)
+}
+
+pub(super) fn video_opening_id(attachment: &Attachment) -> egui::Id {
+    egui::Id::new((
+        "video_opening",
+        attachment
+            .file_id
+            .as_deref()
+            .or(attachment.full_url.as_deref()),
+    ))
 }
 
 /// Long bodies (alert tracebacks and the like) start folded, as in Slack.
@@ -1457,6 +1523,7 @@ mod tests {
             width: None,
             height: None,
             preview_pending: true,
+            video: false,
         };
         let mut frame = |attachment: &Attachment, width| {
             let mut height = 0.0;
@@ -1824,6 +1891,7 @@ mod tests {
             width: Some(400),
             height: Some(200),
             preview_pending: false,
+            video: false,
         }];
         let mut images = ImageCache::new(service, ctx.clone());
         let image_rect = std::cell::Cell::new(egui::Rect::NOTHING);

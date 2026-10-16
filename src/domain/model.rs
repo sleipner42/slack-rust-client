@@ -82,6 +82,9 @@ pub struct Attachment {
     pub height: Option<u32>,
     #[serde(default)]
     pub preview_pending: bool,
+    /// Plays in the system video player; `preview_url` is a still frame.
+    #[serde(default)]
+    pub video: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

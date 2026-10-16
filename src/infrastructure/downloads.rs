@@ -56,6 +56,80 @@ fn save_in(directory: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, SlackE
     )))
 }
 
+/// Where a video is kept for the system player, under the user cache folder.
+pub fn video_path(file_key: &str, name: &str) -> Result<PathBuf, SlackError> {
+    let directory = dirs::cache_dir()
+        .ok_or_else(|| SlackError("Could not find a cache folder.".into()))?
+        .join("better-slack")
+        .join("videos");
+    std::fs::create_dir_all(&directory).map_err(|error| {
+        SlackError(format!("Could not create {}: {error}", directory.display()))
+    })?;
+    let key: String = file_key
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(40)
+        .collect();
+    Ok(directory.join(format!("{key}-{}", safe_name(name))))
+}
+
+/// Keep a downloaded video for replays, dropping videos unused for a week.
+pub fn keep_video(path: &Path, bytes: &[u8]) -> Result<(), SlackError> {
+    if let Some(directory) = path.parent()
+        && let Ok(entries) = std::fs::read_dir(directory)
+    {
+        for entry in entries.flatten() {
+            let old = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .is_ok_and(|modified| modified.elapsed().unwrap_or_default() > VIDEO_CACHE_AGE);
+            if old {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let partial = path.with_extension("part");
+    std::fs::write(&partial, bytes)
+        .and_then(|()| std::fs::rename(&partial, path))
+        .map_err(|error| {
+            let _ = std::fs::remove_file(&partial);
+            SlackError(format!("Could not save {}: {error}", path.display()))
+        })
+}
+
+/// Open a file in the user's default app: xdg-open on Linux, open on macOS.
+pub fn open_with_default_app(path: &Path) -> Result<(), SlackError> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let mut child = std::process::Command::new(opener)
+        .arg(path)
+        .spawn()
+        .map_err(|error| SlackError(format!("Could not run {opener}: {error}")))?;
+    // The opener fails fast without a matching app, but may stay running
+    // while the player is open; only an early failure is an error.
+    let started = std::time::Instant::now();
+    while started.elapsed() < OPENER_GRACE {
+        match child.try_wait() {
+            Ok(Some(status)) if !status.success() => {
+                return Err(SlackError(format!(
+                    "No app is set up to play {}. Install a video player such as mpv.",
+                    path.extension()
+                        .and_then(|extension| extension.to_str())
+                        .unwrap_or("this file")
+                )));
+            }
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(error) => return Err(SlackError(error.to_string())),
+        }
+    }
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+
 /// Slack file names are untrusted: keep only the last path component.
 fn safe_name(name: &str) -> String {
     let name = name
@@ -72,10 +146,22 @@ fn safe_name(name: &str) -> String {
 }
 
 const MAX_ATTEMPTS: usize = 1000;
+const VIDEO_CACHE_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+const OPENER_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_videos_get_safe_unique_names() {
+        let path = video_path("F1/../x", "../../Rendered video.mp4").unwrap();
+        assert_eq!(
+            path.file_name().unwrap().to_str().unwrap(),
+            "F1x-Rendered video.mp4"
+        );
+        assert!(path.parent().unwrap().ends_with("better-slack/videos"));
+    }
 
     #[test]
     fn never_overwrites_and_strips_paths() {
