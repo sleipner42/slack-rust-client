@@ -7,9 +7,20 @@ pub enum Block {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Inline {
-    Text { text: String, style: TextStyle },
-    Mention { label: String, is_self: bool },
-    Link { label: String, url: String },
+    Text {
+        text: String,
+        style: TextStyle,
+    },
+    Mention {
+        label: String,
+        is_self: bool,
+    },
+    Link {
+        label: String,
+        url: String,
+        #[serde(default)]
+        style: TextStyle,
+    },
     Emoji(String),
 }
 
@@ -61,7 +72,7 @@ pub fn clipboard_text(blocks: &[Block]) -> String {
             Block::Paragraph(inlines) | Block::Quote(inlines) => inlines
                 .iter()
                 .map(|inline| match inline {
-                    Inline::Link { label, url } if label != url => format!("{label} ({url})"),
+                    Inline::Link { label, url, .. } if label != url => format!("{label} ({url})"),
                     Inline::Emoji(name) => emojis::get_by_shortcode(name)
                         .map(|emoji| emoji.as_str().to_owned())
                         .unwrap_or_else(|| format!(":{name}:")),
@@ -136,8 +147,11 @@ fn flush(blocks: &mut Vec<Block>, lines: &mut Vec<&str>, is_quote: bool, names: 
     });
 }
 
+/// Links, mentions and code are cut out first and stand in as placeholder
+/// characters, so bold and italic markers can wrap them: `*<url|:fire: title>*`.
 fn parse_inlines(text: &str, names: &dyn NameLookup) -> Vec<Inline> {
-    let mut inlines = Vec::new();
+    let mut tokens = Vec::new();
+    let mut marked = String::new();
     let mut rest = text;
     while !rest.is_empty() {
         let next_token = rest.find('<');
@@ -155,26 +169,90 @@ fn parse_inlines(text: &str, names: &dyn NameLookup) -> Vec<Inline> {
         };
         let inner = &rest[position + 1..position + 1 + length];
         if !is_token && inner.is_empty() {
-            styled(&mut inlines, &rest[..position + 2], TextStyle::default());
+            marked.push_str(&rest[..position + 2]);
             rest = &rest[position + 2..];
             continue;
         }
-        styled(&mut inlines, &rest[..position], TextStyle::default());
-        if is_token {
-            inlines.push(parse_token(inner, names));
+        let Some(placeholder) = char::from_u32(PLACEHOLDER_BASE + tokens.len() as u32) else {
+            break;
+        };
+        marked.push_str(&rest[..position]);
+        marked.push(placeholder);
+        tokens.push(if is_token {
+            parse_token(inner, names)
         } else {
-            inlines.push(Inline::Text {
+            Inline::Text {
                 text: unescape(inner),
                 style: TextStyle {
                     code: true,
                     ..TextStyle::default()
                 },
-            });
-        }
+            }
+        });
         rest = &rest[position + length + 2..];
     }
-    styled(&mut inlines, rest, TextStyle::default());
+    marked.push_str(rest);
+    let mut styled_inlines = Vec::new();
+    styled(&mut styled_inlines, &marked, TextStyle::default());
+    let mut inlines = Vec::new();
+    for inline in styled_inlines {
+        let Inline::Text { text, style } = inline else {
+            inlines.push(inline);
+            continue;
+        };
+        let mut plain = String::new();
+        for c in text.chars() {
+            let token = (c as u32)
+                .checked_sub(PLACEHOLDER_BASE)
+                .and_then(|index| tokens.get(index as usize));
+            match token {
+                Some(token) => {
+                    push_text(&mut inlines, &std::mem::take(&mut plain), style);
+                    push_token(&mut inlines, token.clone(), style);
+                }
+                None => plain.push(c),
+            }
+        }
+        // Already unescaped; escape again so push_text does not unescape twice.
+        push_text(&mut inlines, &escape(&plain), style);
+    }
     inlines
+}
+
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Place a cut-out token inside the surrounding style; link labels get their emoji.
+fn push_token(inlines: &mut Vec<Inline>, token: Inline, outer: TextStyle) {
+    match token {
+        Inline::Text { text, style } => inlines.push(Inline::Text {
+            text,
+            style: TextStyle {
+                bold: style.bold || outer.bold,
+                italic: style.italic || outer.italic,
+                strike: style.strike || outer.strike,
+                code: style.code || outer.code,
+            },
+        }),
+        Inline::Link { label, url, .. } => {
+            let mut pieces = Vec::new();
+            emoji_split(&mut pieces, &escape(&label), TextStyle::default());
+            for piece in pieces {
+                inlines.push(match piece {
+                    Inline::Text { text, .. } => Inline::Link {
+                        label: text,
+                        url: url.clone(),
+                        style: outer,
+                    },
+                    other => other,
+                });
+            }
+        }
+        other => inlines.push(other),
+    }
 }
 
 fn styled(inlines: &mut Vec<Inline>, text: &str, style: TextStyle) {
@@ -345,6 +423,7 @@ fn parse_token(token: &str, names: &dyn NameLookup) -> Inline {
     Inline::Link {
         label: unescape(label.unwrap_or(target.strip_prefix(MAILTO).unwrap_or(target))),
         url: unescape(target),
+        style: TextStyle::default(),
     }
 }
 
@@ -460,6 +539,8 @@ fn unescape(text: &str) -> String {
         .replace("&amp;", "&")
 }
 
+/// Supplementary Private Use Area: never sent in real messages.
+const PLACEHOLDER_BASE: u32 = 0xF0000;
 const CODE_FENCE: &str = "```";
 const ESCAPED_QUOTE: &str = "&gt;";
 const MAILTO: &str = "mailto:";
@@ -523,7 +604,8 @@ mod tests {
                 text(" see "),
                 Inline::Link {
                     label: "docs".into(),
-                    url: "https://x.io/a_b".into()
+                    url: "https://x.io/a_b".into(),
+                    style: TextStyle::default(),
                 },
                 text(" in "),
                 Inline::Mention {
@@ -613,6 +695,38 @@ mod tests {
         let blocks = parse_message_text("Traceback ...<4 lines>... end", &Names);
         assert_eq!(plain_text(&blocks), "Traceback ...<4 lines>... end");
         assert!(!blocks.iter().any(|block| matches!(block, Block::Paragraph(inlines) if inlines.iter().any(|inline| matches!(inline, Inline::Link { .. })))));
+    }
+
+    #[test]
+    fn styles_wrap_links_and_link_labels_show_emoji() {
+        let bold = TextStyle {
+            bold: true,
+            ..TextStyle::default()
+        };
+        let link = |label: &str| Inline::Link {
+            label: label.into(),
+            url: "https://fly.io/apps/a".into(),
+            style: bold,
+        };
+        assert_eq!(
+            parse_message_text(
+                "*<https://fly.io/apps/a|:rotating_light: metrics (sjc)>* &amp; _`x`_",
+                &Names
+            ),
+            vec![Block::Paragraph(vec![
+                Inline::Emoji("rotating_light".into()),
+                link(" metrics (sjc)"),
+                text(" & "),
+                with_style(
+                    "x",
+                    TextStyle {
+                        italic: true,
+                        code: true,
+                        ..TextStyle::default()
+                    }
+                ),
+            ])]
+        );
     }
 
     #[test]

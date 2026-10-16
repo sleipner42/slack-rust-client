@@ -126,13 +126,20 @@ fn paragraph(
                 };
                 label.clone()
             }
-            Inline::Link { label, url } => {
+            Inline::Link { label, url, style } => {
                 paragraph.links.push(LinkSpan {
                     chars: offset..offset + label.chars().count(),
                     label: label.clone(),
                     url: url.clone(),
                 });
+                if style.bold {
+                    format.font_id.family = theme::bold_family();
+                }
+                format.italics = style.italic;
                 format.color = theme::LINK;
+                if style.strike {
+                    format.strikethrough = egui::Stroke::new(1.0, format.color);
+                }
                 label.clone()
             }
             Inline::Emoji(name) => {
@@ -646,6 +653,7 @@ mod tests {
             Inline::Link {
                 label: url.clone(),
                 url: url.clone(),
+                style: Default::default(),
             },
             text(".\nNext line."),
         ];
@@ -769,6 +777,7 @@ mod tests {
             Inline::Link {
                 label: url.into(),
                 url: url.into(),
+                style: Default::default(),
             },
             text(" after the URL"),
         ];
@@ -937,6 +946,7 @@ mod tests {
             Inline::Link {
                 label: "docs".into(),
                 url: "https://example.test".into(),
+                style: Default::default(),
             },
             Inline::Emoji("tada".into()),
             text(" after"),
