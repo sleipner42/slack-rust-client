@@ -374,7 +374,7 @@ pub fn render_detail_blocks(
     selecting
 }
 
-fn selectable_label(
+pub(crate) fn selectable_label(
     ui: &mut egui::Ui,
     label: egui::Label,
     offscreen_selection: Option<&egui::Ui>,

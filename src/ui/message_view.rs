@@ -293,15 +293,16 @@ fn message_row(
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 12.0;
                 if compact {
-                    ui.add_sized(
+                    let stamp = ui.add_sized(
                         [AVATAR_SIZE, 18.0],
                         egui::Label::new(
                             RichText::new(time.format("%H:%M").to_string())
                                 .size(9.0)
                                 .color(theme::TEXT_MUTED),
                         ),
-                    )
-                    .on_hover_text(time.format("%A, %B %e, %Y at %H:%M:%S").to_string());
+                    );
+                    selecting |= stamp.dragged_by(egui::PointerButton::Primary);
+                    stamp.on_hover_text(time.format("%A, %B %e, %Y at %H:%M:%S").to_string());
                 } else {
                     avatar(ui, message, context.images);
                 }
@@ -310,17 +311,25 @@ fn message_row(
                     ui.set_width(ui.available_width().max(1.0));
                     if !compact {
                         ui.horizontal_wrapped(|ui| {
-                            ui.label(
+                            let author = header_label(
+                                ui,
                                 RichText::new(&message.author)
                                     .strong()
                                     .color(theme::TEXT_STRONG),
+                                offscreen,
                             );
-                            ui.label(
+                            let stamp = header_label(
+                                ui,
                                 RichText::new(time.format("%H:%M").to_string())
                                     .small()
                                     .color(theme::TEXT_MUTED),
-                            )
-                            .on_hover_text(time.format("%A, %B %e, %Y at %H:%M:%S").to_string());
+                                offscreen,
+                            );
+                            selecting |= author.dragged_by(egui::PointerButton::Primary)
+                                || stamp.dragged_by(egui::PointerButton::Primary);
+                            stamp.on_hover_text(
+                                time.format("%A, %B %e, %Y at %H:%M:%S").to_string(),
+                            );
                         });
                     }
                     match context
@@ -333,7 +342,12 @@ fn message_row(
                                 action = Some(edit_action);
                             }
                         }
-                        None => (fade, selecting) = folded_blocks(ui, message, context, offscreen),
+                        None => {
+                            let (folded_fade, body_selecting) =
+                                folded_blocks(ui, message, context, offscreen);
+                            fade = folded_fade;
+                            selecting |= body_selecting;
+                        }
                     }
                     for share in &message.shares {
                         let (card_selecting, opened) = shared_card(ui, share, context, offscreen);
@@ -669,6 +683,12 @@ fn edit_box(ui: &mut egui::Ui, edit: &mut MessageEdit) -> Option<MessageAction> 
     action
 }
 
+/// Author names and times select like message text, so a drag from them also
+/// scrolls the pane at its edges.
+fn header_label(ui: &mut egui::Ui, text: RichText, offscreen: &egui::Ui) -> egui::Response {
+    crate::ui::rich_text::selectable_label(ui, egui::Label::new(text), Some(offscreen))
+}
+
 /// A shared message or pasted message link, quoted as a card like Slack does.
 fn shared_card(
     ui: &mut egui::Ui,
@@ -677,6 +697,7 @@ fn shared_card(
     offscreen: &egui::Ui,
 ) -> (bool, Option<MessageAction>) {
     let mut selecting = false;
+    let mut header_selecting = false;
     ui.add_space(4.0);
     let card = egui::Frame::new()
         .stroke(egui::Stroke::new(1.0, theme::BORDER))
@@ -696,11 +717,14 @@ fn shared_card(
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(
+                        let author = header_label(
+                            ui,
                             RichText::new(&share.author)
                                 .strong()
                                 .color(theme::TEXT_STRONG),
+                            offscreen,
                         );
+                        header_selecting |= author.dragged_by(egui::PointerButton::Primary);
                         if let Some(ts) = &share.ts {
                             let time = local_time(ts);
                             let format = if time.date_naive() == Local::now().date_naive() {
@@ -708,27 +732,38 @@ fn shared_card(
                             } else {
                                 "%b %e at %H:%M"
                             };
-                            ui.label(
+                            let stamp = header_label(
+                                ui,
                                 RichText::new(time.format(format).to_string())
                                     .small()
                                     .color(theme::TEXT_MUTED),
-                            )
-                            .on_hover_text(time.format("%A, %B %e, %Y at %H:%M:%S").to_string());
+                                offscreen,
+                            );
+                            header_selecting |= stamp.dragged_by(egui::PointerButton::Primary);
+                            stamp.on_hover_text(
+                                time.format("%A, %B %e, %Y at %H:%M:%S").to_string(),
+                            );
                         }
                     });
                     if let Some(place) = &share.context {
-                        ui.label(RichText::new(place).small().color(theme::TEXT_MUTED));
+                        header_selecting |= header_label(
+                            ui,
+                            RichText::new(place).small().color(theme::TEXT_MUTED),
+                            offscreen,
+                        )
+                        .dragged_by(egui::PointerButton::Primary);
                     }
                 });
             });
             ui.add_space(4.0);
-            selecting = render_blocks(
-                ui,
-                &share.blocks,
-                context.emoji,
-                context.images,
-                Some(offscreen),
-            );
+            selecting = header_selecting
+                | render_blocks(
+                    ui,
+                    &share.blocks,
+                    context.emoji,
+                    context.images,
+                    Some(offscreen),
+                );
         })
         .response;
     let target = share
@@ -1458,6 +1493,15 @@ mod tests {
 
     #[test]
     fn dragging_a_selection_to_the_top_scrolls_and_keeps_the_offscreen_anchor() {
+        drag_selection_to_the_top_from("Message 39");
+    }
+
+    #[test]
+    fn dragging_from_an_author_name_scrolls_too() {
+        drag_selection_to_the_top_from("Newest Author");
+    }
+
+    fn drag_selection_to_the_top_from(start_label: &str) {
         let ctx = egui::Context::default();
         theme::apply(&ctx);
         ctx.enable_accesskit();
@@ -1473,6 +1517,9 @@ mod tests {
                 message.attachments.clear();
                 message.reactions.clear();
                 message.reply_count = 0;
+                if index == 39 {
+                    message.author = "Newest Author".into();
+                }
                 message.blocks = vec![Block::Paragraph(vec![Inline::Text {
                     text: format!("Message {index:02}"),
                     style: TextStyle::default(),
@@ -1526,7 +1573,7 @@ mod tests {
                 .take()
                 .and_then(|update| {
                     update.nodes.into_iter().find_map(|(_, node)| {
-                        (node.value().or(node.label()) == Some("Message 39"))
+                        (node.value().or(node.label()) == Some(start_label))
                             .then(|| node.bounds())
                             .flatten()
                     })
@@ -1561,7 +1608,7 @@ mod tests {
                 _ => None,
             })
             .expect("the selection must survive its anchor scrolling away");
-        assert!(copied.contains("Message 39"), "{copied}");
+        assert!(copied.contains(start_label), "{copied}");
         assert!(copied.contains("Message 30"), "{copied}");
     }
 
