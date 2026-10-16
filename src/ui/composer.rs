@@ -69,16 +69,6 @@ pub fn composer(ui: &mut egui::Ui, target: &ComposeTarget, draft: &mut Draft, hi
                     egui::Button::new("Send").min_size(egui::vec2(56.0, 24.0)),
                 );
                 send = response.clicked();
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new("Enter sends · Shift+Enter newline")
-                                .small()
-                                .weak(),
-                        )
-                        .truncate(),
-                    );
-                });
             });
         });
     let submitted = (enter || send) && can_send(draft);

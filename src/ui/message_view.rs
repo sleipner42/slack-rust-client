@@ -607,6 +607,7 @@ fn can_edit(message: &DisplayMessage, context: &MessageContext<'_>) -> bool {
 
 fn edit_box(ui: &mut egui::Ui, edit: &mut MessageEdit) -> Option<MessageAction> {
     let id = egui::Id::new(("message_edit", &edit.ts));
+    super::markup_editor::restore_focus(ui, id);
     let mut action = None;
     if ui.memory(|memory| memory.has_focus(id)) && !edit.saving {
         super::markup_editor::shortcuts(ui, id, &mut edit.text);
@@ -638,6 +639,10 @@ fn edit_box(ui: &mut egui::Ui, edit: &mut MessageEdit) -> Option<MessageAction> 
         .corner_radius(2)
         .inner_margin(8)
         .show(ui, |ui| {
+            ui.add_enabled_ui(!edit.saving, |ui| {
+                super::markup_editor::toolbar(ui, id, &mut edit.text);
+            });
+            ui.add_space(4.0);
             let mut layouter = super::markup_editor::layouter();
             ui.add_enabled(
                 !edit.saving,
@@ -671,11 +676,6 @@ fn edit_box(ui: &mut egui::Ui, edit: &mut MessageEdit) -> Option<MessageAction> 
         {
             action = Some(MessageAction::SaveEdit);
         }
-        ui.label(
-            RichText::new("Escape to cancel · Enter to save")
-                .small()
-                .color(theme::TEXT_MUTED),
-        );
     });
     if let Some(error) = &edit.error {
         ui.colored_label(theme::SELF_MENTION_TEXT, error);
@@ -1754,7 +1754,9 @@ mod tests {
             assert!(shown.contains(expected), "{expected} missing from {shown}");
         }
         let editing = texts(true);
-        assert!(editing.contains("draft edit") && editing.contains("Enter to save"));
+        assert!(
+            editing.contains("draft edit") && editing.contains("Save") && editing.contains("</>")
+        );
         assert!(
             !editing.contains("original body"),
             "the editor replaces the body"
