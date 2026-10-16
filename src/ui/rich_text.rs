@@ -410,17 +410,25 @@ pub fn scroll_text_selection(ui: &egui::Ui, selecting: bool) {
     if !selecting {
         return;
     }
-    let Some((pointer, dt)) = ui.input(|input| {
+    let Some((pointer, dt, wheel)) = ui.input(|input| {
         input
             .pointer
             .interact_pos()
-            .map(|pos| (pos, input.stable_dt.min(0.05)))
+            .map(|pos| (pos, input.stable_dt.min(0.05), input.smooth_scroll_delta))
     }) else {
         return;
     };
     let rect = ui.clip_rect();
     if pointer.x < rect.left() - 24.0 || pointer.x > rect.right() + 24.0 {
         return;
+    }
+    // Scroll areas ignore the wheel while anything is dragged; apply it here.
+    if wheel.y != 0.0 && rect.contains(pointer) {
+        ui.input_mut(|input| input.smooth_scroll_delta.y = 0.0);
+        ui.scroll_with_delta_animation(
+            egui::vec2(0.0, wheel.y),
+            egui::style::ScrollAnimation::none(),
+        );
     }
     let edge = 28.0_f32.min(rect.height() / 3.0);
     let speed = if pointer.y < rect.top() + edge {
@@ -622,6 +630,29 @@ mod tests {
         assert!(up < stopped - 200.0, "drag at the top must scroll up");
         assert!(commands.iter().any(|command| matches!(command,
             egui::OutputCommand::CopyText(text) if text.contains("Line 10"))));
+
+        // The wheel scrolls while a selection is held in the middle of the pane.
+        frame(vec![button(top, false)]);
+        let middle = egui::pos2(100.0, 120.0);
+        frame(vec![
+            egui::Event::PointerMoved(middle),
+            button(middle, true),
+        ]);
+        let (held, _) = frame(vec![egui::Event::PointerMoved(egui::pos2(110.0, 120.0))]);
+        frame(vec![egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -120.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Default::default(),
+        }]);
+        for _ in 0..30 {
+            frame(vec![]);
+        }
+        let (wheeled, _) = frame(vec![]);
+        assert!(
+            wheeled > held + 60.0,
+            "the wheel must scroll while selecting: {wheeled} from {held}"
+        );
     }
 
     #[test]
