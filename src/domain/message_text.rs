@@ -285,7 +285,7 @@ fn styled(inlines: &mut Vec<Inline>, text: &str, style: TextStyle) {
     );
 }
 
-fn opens_at(chars: &[char], index: usize) -> bool {
+pub(crate) fn opens_at(chars: &[char], index: usize) -> bool {
     let before_ok = index == 0 || !chars[index - 1].is_alphanumeric();
     let after_ok = chars
         .get(index + 1)
@@ -293,7 +293,7 @@ fn opens_at(chars: &[char], index: usize) -> bool {
     before_ok && after_ok
 }
 
-fn find_close(chars: &[char], open: usize) -> Option<usize> {
+pub(crate) fn find_close(chars: &[char], open: usize) -> Option<usize> {
     let marker = chars[open];
     (open + 2..chars.len())
         .take_while(|&i| chars[i] != '\n')
@@ -544,7 +544,7 @@ const PLACEHOLDER_BASE: u32 = 0xF0000;
 const CODE_FENCE: &str = "```";
 const ESCAPED_QUOTE: &str = "&gt;";
 const MAILTO: &str = "mailto:";
-const STYLE_MARKERS: [char; 3] = ['*', '_', '~'];
+pub(crate) const STYLE_MARKERS: [char; 3] = ['*', '_', '~'];
 const SKIN_TONE_PREFIX: &str = "skin-tone-";
 const MAX_EMOJI_NAME_LENGTH: usize = 64;
 const BROADCAST_NAMES: [&str; 3] = ["here", "channel", "everyone"];

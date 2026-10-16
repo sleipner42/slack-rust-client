@@ -7,6 +7,7 @@ mod emoji_picker;
 mod image_viewer;
 mod images;
 pub mod labels;
+mod markup_editor;
 mod message_view;
 mod outbox;
 pub mod quick_switcher;

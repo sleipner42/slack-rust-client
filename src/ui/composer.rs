@@ -23,6 +23,9 @@ pub fn composer(ui: &mut egui::Ui, target: &ComposeTarget, draft: &mut Draft, hi
     draft.attachments.poll(ui.ctx());
     let id = target.editor_id();
     let focused = ui.is_enabled() && ui.memory(|memory| memory.has_focus(id));
+    if focused {
+        super::markup_editor::shortcuts(ui, id, &mut draft.text);
+    }
     let enter = if focused {
         ui.input_mut(|input| consume_submit(&mut input.events, &mut draft.ime_active))
     } else {
@@ -35,6 +38,9 @@ pub fn composer(ui: &mut egui::Ui, target: &ComposeTarget, draft: &mut Draft, hi
         .corner_radius(2)
         .inner_margin(12)
         .show(ui, |ui| {
+            super::markup_editor::toolbar(ui, id, &mut draft.text);
+            ui.add_space(4.0);
+            let mut layouter = super::markup_editor::layouter();
             egui::ScrollArea::vertical()
                 .id_salt(("draft", target))
                 .max_height(140.0)
@@ -42,6 +48,7 @@ pub fn composer(ui: &mut egui::Ui, target: &ComposeTarget, draft: &mut Draft, hi
                     ui.add(
                         egui::TextEdit::multiline(&mut draft.text)
                             .id(id)
+                            .layouter(&mut layouter)
                             .hint_text(hint.to_string())
                             .desired_width(ui.available_width())
                             .desired_rows(2)
@@ -118,6 +125,70 @@ pub(super) fn consume_submit(events: &mut Vec<egui::Event>, ime_active: &mut boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lists_continue_and_shortcuts_format_while_typing() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::apply(&ctx);
+        let target = ComposeTarget {
+            conversation_id: "C1".into(),
+            thread_ts: None,
+        };
+        let mut draft = Draft::default();
+        ctx.memory_mut(|memory| memory.request_focus(target.editor_id()));
+        let mut frame = |events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    focused: true,
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(500.0, 300.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    composer(ui, &target, &mut draft, "Message");
+                },
+            );
+            output.textures_delta.clear();
+        };
+        let key = |key, modifiers, pressed| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        };
+        let shift_enter = vec![
+            key(egui::Key::Enter, egui::Modifiers::SHIFT, true),
+            key(egui::Key::Enter, egui::Modifiers::SHIFT, false),
+        ];
+        frame(vec![]);
+        frame(vec![
+            key(
+                egui::Key::Num8,
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                true,
+            ),
+            key(
+                egui::Key::Num8,
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                false,
+            ),
+        ]);
+        frame(vec![egui::Event::Text("one".into())]);
+        frame(shift_enter.clone());
+        frame(vec![egui::Event::Text("two".into())]);
+        frame(shift_enter.clone());
+        frame(shift_enter);
+        frame(vec![
+            key(egui::Key::B, egui::Modifiers::COMMAND, true),
+            key(egui::Key::B, egui::Modifiers::COMMAND, false),
+        ]);
+        frame(vec![egui::Event::Text("loud".into())]);
+        assert_eq!(draft.text, "• one\n• two\n*loud*");
+    }
 
     #[test]
     fn multiline_editor_accepts_shift_enter_and_submits_without_an_extra_newline() {

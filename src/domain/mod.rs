@@ -1,5 +1,6 @@
 pub mod activity;
 pub mod gateway;
+pub mod markup;
 pub mod message_text;
 pub mod model;
 pub mod notify;

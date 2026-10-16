@@ -595,6 +595,7 @@ fn edit_box(ui: &mut egui::Ui, edit: &mut MessageEdit) -> Option<MessageAction> 
     let id = egui::Id::new(("message_edit", &edit.ts));
     let mut action = None;
     if ui.memory(|memory| memory.has_focus(id)) && !edit.saving {
+        super::markup_editor::shortcuts(ui, id, &mut edit.text);
         let (submit, cancel) = ui.input_mut(|input| {
             (
                 super::composer::consume_submit(&mut input.events, &mut edit.ime_active),
@@ -623,10 +624,12 @@ fn edit_box(ui: &mut egui::Ui, edit: &mut MessageEdit) -> Option<MessageAction> 
         .corner_radius(2)
         .inner_margin(8)
         .show(ui, |ui| {
+            let mut layouter = super::markup_editor::layouter();
             ui.add_enabled(
                 !edit.saving,
                 egui::TextEdit::multiline(&mut edit.text)
                     .id(id)
+                    .layouter(&mut layouter)
                     .desired_width(ui.available_width())
                     .desired_rows(1)
                     .frame(egui::Frame::NONE)
