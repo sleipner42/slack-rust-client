@@ -159,7 +159,24 @@ pub fn apply(ctx: &egui::Context, id: egui::Id, text: &mut String, format: Forma
             egui::text::CCursor::new(selection.end),
         )));
     state.store(ctx, id);
-    ctx.memory_mut(|memory| memory.request_focus(id));
+    // A toolbar press has already taken focus from the editor this frame, and
+    // the editor would drop a request made now; give it back next frame.
+    ctx.data_mut(|data| data.insert_temp(refocus_id(id), true));
+    ctx.request_repaint();
+}
+
+/// Return focus to the editor after a toolbar button; call before drawing it.
+pub fn restore_focus(ui: &egui::Ui, id: egui::Id) {
+    if ui
+        .data_mut(|data| data.remove_temp::<bool>(refocus_id(id)))
+        .is_some()
+    {
+        ui.memory_mut(|memory| memory.request_focus(id));
+    }
+}
+
+fn refocus_id(id: egui::Id) -> egui::Id {
+    id.with("refocus")
 }
 
 /// The formatting buttons above the composer.

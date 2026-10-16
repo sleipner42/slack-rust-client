@@ -22,6 +22,7 @@ pub struct Draft {
 pub fn composer(ui: &mut egui::Ui, target: &ComposeTarget, draft: &mut Draft, hint: &str) -> bool {
     draft.attachments.poll(ui.ctx());
     let id = target.editor_id();
+    super::markup_editor::restore_focus(ui, id);
     let focused = ui.is_enabled() && ui.memory(|memory| memory.has_focus(id));
     if focused {
         super::markup_editor::shortcuts(ui, id, &mut draft.text);
@@ -152,6 +153,15 @@ mod tests {
                 },
             );
             output.textures_delta.clear();
+            output
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) if text.galley.text() == "I" => {
+                        Some(text.visual_bounding_rect())
+                    }
+                    _ => None,
+                })
         };
         let key = |key, modifiers, pressed| egui::Event::Key {
             key,
@@ -187,7 +197,20 @@ mod tests {
             key(egui::Key::B, egui::Modifiers::COMMAND, false),
         ]);
         frame(vec![egui::Event::Text("loud".into())]);
-        assert_eq!(draft.text, "• one\n• two\n*loud*");
+        let italic = frame(vec![]).expect("toolbar drawn");
+        let at = italic.center();
+        let click = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![egui::Event::PointerMoved(at)]);
+        frame(vec![click(true)]);
+        frame(vec![click(false)]);
+        frame(vec![]);
+        frame(vec![egui::Event::Text("soft".into())]);
+        assert_eq!(draft.text, "• one\n• two\n*loud_soft_*");
     }
 
     #[test]
