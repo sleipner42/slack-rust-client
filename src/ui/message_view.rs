@@ -13,13 +13,23 @@ pub enum MessageAction {
     RetrySend(String),
     OpenImage(Attachment),
     OpenThread(String),
-    ToggleReaction { ts: String, name: String, add: bool },
+    ToggleReaction {
+        ts: String,
+        name: String,
+        add: bool,
+    },
     PickReaction(String),
     Download(Attachment),
     CopyImage(Attachment),
     Edit(String),
     SaveEdit,
     CancelEdit,
+    Share(String),
+    /// Open a shared message where it was posted: the thread it starts or belongs to.
+    OpenShare {
+        conversation_id: String,
+        ts: String,
+    },
 }
 
 /// An own message being edited in place.
@@ -326,7 +336,11 @@ fn message_row(
                         None => (fade, selecting) = folded_blocks(ui, message, context, offscreen),
                     }
                     for share in &message.shares {
-                        selecting |= shared_card(ui, share, context, offscreen);
+                        let (card_selecting, opened) = shared_card(ui, share, context, offscreen);
+                        selecting |= card_selecting;
+                        if opened.is_some() {
+                            action = opened;
+                        }
                     }
                     match delivery {
                         Some(Delivery::Sending) => {
@@ -379,7 +393,9 @@ fn message_row(
                         ui.add_space(4.0);
                         ui.horizontal_wrapped(|ui| {
                             for reaction in &message.reactions {
-                                if reaction_button(ui, reaction, context).clicked() {
+                                if reaction_button(ui, reaction, &message.reactors, context)
+                                    .clicked()
+                                {
                                     action = Some(MessageAction::ToggleReaction {
                                         ts: message.ts.clone(),
                                         name: reaction.name.clone(),
@@ -458,6 +474,10 @@ fn message_row(
             action = Some(MessageAction::Edit(message.ts.clone()));
             ui.close();
         }
+        if confirmed && ui.button("Share message…").clicked() {
+            action = Some(MessageAction::Share(message.ts.clone()));
+            ui.close();
+        }
         if ui.button("Copy message text").clicked() {
             ui.ctx()
                 .copy_text(crate::domain::message_text::plain_text(&message.blocks));
@@ -528,6 +548,16 @@ fn message_toolbar(
                     message.thread_ts.as_ref().unwrap_or(&message.ts).clone(),
                 ));
             }
+            if ui
+                .add_sized(
+                    [48.0, 28.0],
+                    egui::Button::new("Share").frame_when_inactive(false),
+                )
+                .on_hover_text("Share message")
+                .clicked()
+            {
+                action = Some(MessageAction::Share(message.ts.clone()));
+            }
             if can_edit(message, context)
                 && ui
                     .add_sized(
@@ -543,7 +573,7 @@ fn message_toolbar(
 }
 
 fn toolbar_width(message: &DisplayMessage, context: &MessageContext<'_>) -> f32 {
-    let base = if context.allow_threads { 202.0 } else { 154.0 };
+    let base = if context.allow_threads { 254.0 } else { 206.0 };
     if can_edit(message, context) {
         base + 44.0
     } else {
@@ -642,10 +672,10 @@ fn shared_card(
     share: &DisplayShare,
     context: &mut MessageContext<'_>,
     offscreen: &egui::Ui,
-) -> bool {
+) -> (bool, Option<MessageAction>) {
     let mut selecting = false;
     ui.add_space(4.0);
-    egui::Frame::new()
+    let card = egui::Frame::new()
         .stroke(egui::Stroke::new(1.0, theme::BORDER))
         .corner_radius(6)
         .inner_margin(egui::Margin::symmetric(12, 10))
@@ -696,8 +726,25 @@ fn shared_card(
                 context.images,
                 Some(offscreen),
             );
-        });
-    selecting
+        })
+        .response;
+    let target = share
+        .channel_id
+        .clone()
+        .zip(share.thread_ts.clone().or(share.ts.clone()));
+    let Some((conversation_id, ts)) = target else {
+        return (selecting, None);
+    };
+    // Added last so a click anywhere opens it; drags still select the text beneath.
+    let open = ui
+        .interact(card.rect, card.id.with("open"), egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Open message");
+    let opened = open.clicked().then_some(MessageAction::OpenShare {
+        conversation_id,
+        ts,
+    });
+    (selecting, opened)
 }
 
 fn quick_reaction_button(
@@ -847,12 +894,13 @@ pub fn emoji_button(
                 },
             ))
     };
-    ui.add(button).on_hover_text(format!(":{name}:"))
+    ui.add(button)
 }
 
 fn reaction_button(
     ui: &mut egui::Ui,
     reaction: &Reaction,
+    reactors: &std::collections::BTreeMap<String, String>,
     context: &mut MessageContext<'_>,
 ) -> egui::Response {
     let mine = reaction
@@ -867,11 +915,49 @@ fn reaction_button(
         context.emoji,
         context.images,
     )
-    .on_hover_text(if mine {
-        "Click to remove your reaction"
-    } else {
-        "Click to react"
-    })
+    .on_hover_text(format!(
+        "{}\n{}",
+        reacted_by(reaction, reactors, context.self_user_id),
+        if mine {
+            "Click to remove your reaction"
+        } else {
+            "Click to react"
+        }
+    ))
+}
+
+/// "Anna, Bo and you reacted with :heart:", as Slack's reaction tooltip says.
+fn reacted_by(
+    reaction: &Reaction,
+    reactors: &std::collections::BTreeMap<String, String>,
+    self_user_id: &str,
+) -> String {
+    let mut names: Vec<String> = reaction
+        .user_ids
+        .iter()
+        .filter(|id| *id != self_user_id)
+        .map(|id| reactors.get(id).cloned().unwrap_or_else(|| id.clone()))
+        .collect();
+    if reaction.user_ids.iter().any(|id| id == self_user_id) {
+        names.push("you".into());
+    }
+    let others = (reaction.count as usize).saturating_sub(reaction.user_ids.len());
+    if others > 0 {
+        names.push(match others {
+            1 => "1 other".into(),
+            n => format!("{n} others"),
+        });
+    }
+    let people = match names.split_last() {
+        None => "Nobody".into(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    };
+    let people = match people.strip_prefix("you") {
+        Some(rest) => format!("You{rest}"),
+        None => people,
+    };
+    format!("{people} reacted with :{}:", reaction.name)
 }
 
 pub enum AttachmentClick {
@@ -1499,6 +1585,8 @@ mod tests {
                 text: "Out of interest".into(),
                 style: TextStyle::default(),
             }])],
+            channel_id: Some("C9".into()),
+            thread_ts: Some("1.0".into()),
         }];
         let mut images = ImageCache::new(service, ctx.clone());
         let mut edit = MessageEdit::new(message.ts.clone(), "draft edit".into());
@@ -1555,6 +1643,117 @@ mod tests {
             "the editor replaces the body"
         );
         assert!(editing.contains("Out of interest"), "shares stay visible");
+    }
+
+    #[test]
+    fn clicking_a_shared_message_opens_its_thread() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let service = Arc::new(ChatService::new(Arc::new(DemoGateway::new())));
+        let workspace = service.load_workspace().unwrap();
+        let mut message = service.messages("C1").unwrap().remove(0);
+        message.avatar_url = None;
+        message.attachments.clear();
+        message.reactions.clear();
+        message.shares = vec![DisplayShare {
+            author: "Mart Bakler".into(),
+            avatar_url: None,
+            ts: Some("1.5".into()),
+            context: Some("Thread in #reflection-vend".into()),
+            blocks: vec![Block::Paragraph(vec![Inline::Text {
+                text: "Out of interest".into(),
+                style: TextStyle::default(),
+            }])],
+            channel_id: Some("C9".into()),
+            thread_ts: Some("1.0".into()),
+        }];
+        let mut images = ImageCache::new(service, ctx.clone());
+        let card_text = std::cell::Cell::new(egui::Rect::NOTHING);
+        let mut frame = |events: Vec<egui::Event>| {
+            let mut action = None;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(700.0, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    action = message_list(
+                        ui,
+                        "open_share",
+                        std::slice::from_ref(&message),
+                        &mut MessageContext {
+                            emoji: &workspace.emoji,
+                            images: &mut images,
+                            self_user_id: "me",
+                            allow_threads: true,
+                            outbox: &Outbox::default(),
+                            new_after: None,
+                            edit: None,
+                        },
+                    )
+                    .action;
+                },
+            );
+            output.textures_delta.clear();
+            for clipped in &output.shapes {
+                if let egui::Shape::Text(text) = &clipped.shape
+                    && text.galley.text() == "Out of interest"
+                {
+                    card_text.set(text.visual_bounding_rect());
+                }
+            }
+            action
+        };
+        frame(vec![]);
+        frame(vec![]);
+        let at = card_text.get().center();
+        assert!(card_text.get().is_positive(), "shared text drawn");
+        let click = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![egui::Event::PointerMoved(at)]);
+        frame(vec![click(true)]);
+        let action = frame(vec![click(false)]);
+        assert!(
+            matches!(&action, Some(MessageAction::OpenShare { conversation_id, ts })
+                if conversation_id == "C9" && ts == "1.0"),
+            "a click opens the thread the original lives in"
+        );
+    }
+
+    #[test]
+    fn reaction_tooltips_name_who_reacted() {
+        let reactors = [("U1", "Anna"), ("U2", "Bo")]
+            .map(|(id, name)| (id.to_owned(), name.to_owned()))
+            .into();
+        let reaction = |ids: &[&str], count| Reaction {
+            name: "heart".into(),
+            count,
+            user_ids: ids.iter().map(|id| id.to_string()).collect(),
+        };
+        assert_eq!(
+            reacted_by(&reaction(&["U1"], 1), &reactors, "me"),
+            "Anna reacted with :heart:"
+        );
+        assert_eq!(
+            reacted_by(&reaction(&["me", "U1", "U2"], 3), &reactors, "me"),
+            "Anna, Bo and you reacted with :heart:"
+        );
+        assert_eq!(
+            reacted_by(&reaction(&["me"], 1), &reactors, "me"),
+            "You reacted with :heart:"
+        );
+        assert_eq!(
+            reacted_by(&reaction(&["U9", "U1"], 4), &reactors, "me"),
+            "U9, Anna and 2 others reacted with :heart:"
+        );
     }
 
     #[test]

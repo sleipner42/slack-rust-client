@@ -101,6 +101,12 @@ pub trait SlackGateway: Send + Sync {
             "Editing messages is unavailable for this workspace.".into(),
         ))
     }
+    /// A link to the message that Slack unfurls as a shared message.
+    fn permalink(&self, _conversation_id: &str, _ts: &str) -> Result<String, SlackError> {
+        Err(SlackError(
+            "Sharing messages is unavailable for this workspace.".into(),
+        ))
+    }
     fn mark_read(&self, conversation_id: &str, ts: &str) -> Result<(), SlackError>;
     fn set_reaction(
         &self,

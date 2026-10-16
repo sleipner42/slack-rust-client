@@ -106,6 +106,8 @@ pub struct SharedMessage {
     pub ts: Option<String>,
     pub channel_id: Option<String>,
     pub in_thread: bool,
+    /// Root of the thread the original belongs to, if any.
+    pub thread_ts: Option<String>,
     /// Slack's own "Thread in #channel" style caption, used when the channel is unknown.
     pub footer: Option<String>,
     pub text: String,

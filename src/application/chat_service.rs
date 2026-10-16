@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,6 +26,9 @@ pub struct DisplayMessage {
     pub thread_ts: Option<String>,
     pub reply_count: u32,
     pub reactions: Vec<Reaction>,
+    /// Names of the people who reacted, by user ID.
+    #[serde(default)]
+    pub reactors: BTreeMap<String, String>,
     pub attachments: Vec<Attachment>,
     #[serde(default)]
     pub shares: Vec<DisplayShare>,
@@ -43,6 +46,10 @@ pub struct DisplayShare {
     /// Where the original was posted, e.g. "Thread in #general".
     pub context: Option<String>,
     pub blocks: Vec<Block>,
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    #[serde(default)]
+    pub thread_ts: Option<String>,
 }
 
 impl DisplayMessage {
@@ -444,6 +451,7 @@ impl ChatService {
             thread_ts: thread_ts.map(str::to_owned),
             reply_count: 0,
             reactions: vec![],
+            reactors: BTreeMap::new(),
             attachments: vec![],
             shares: vec![],
             text: text.into(),
@@ -472,6 +480,10 @@ impl ChatService {
         edited.edited = true;
         edited.update_layout_key();
         edited
+    }
+
+    pub fn permalink(&self, conversation_id: &str, ts: &str) -> Result<String, SlackError> {
+        self.gateway.permalink(conversation_id, ts)
     }
 
     pub fn mark_read(&self, conversation_id: &str, ts: &str) -> Result<(), SlackError> {
@@ -681,6 +693,12 @@ fn referenced_users(messages: &[Message]) -> Vec<String> {
             users.0.borrow_mut().insert(id.clone());
         }
         parse_message_text(&message.text, &users);
+        for reaction in &message.reactions {
+            users
+                .0
+                .borrow_mut()
+                .extend(reaction.user_ids.iter().cloned());
+        }
         for share in &message.shares {
             if let Author::User(id) = &share.author {
                 users.0.borrow_mut().insert(id.clone());
@@ -739,6 +757,13 @@ fn display_message(
         thread_ts: message.thread_ts.clone(),
         reply_count: message.reply_count,
         reactions: message.reactions.clone(),
+        reactors: message
+            .reactions
+            .iter()
+            .flat_map(|reaction| &reaction.user_ids)
+            .filter_map(|id| Some((id.clone(), profiles(id)?.name)))
+            .filter(|(id, name)| id != name)
+            .collect(),
         attachments: message.attachments.clone(),
         shares: message
             .shares
@@ -802,6 +827,8 @@ fn display_share(
         ts: share.ts.clone(),
         context,
         blocks: parse_message_text(&share.text, names),
+        channel_id: share.channel_id.clone(),
+        thread_ts: share.thread_ts.clone(),
     }
 }
 

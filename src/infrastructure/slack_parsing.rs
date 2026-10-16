@@ -100,16 +100,30 @@ fn parse_share(attachment: &Value) -> SharedMessage {
         .as_str()
         .or(attachment["message_blocks"][0]["channel"].as_str())
         .map(str::to_owned);
+    let ts = attachment["ts"]
+        .as_str()
+        .or(attachment["message_blocks"][0]["ts"].as_str())
+        .map(str::to_owned);
+    let root = attachment["is_thread_root_unfurl"].as_bool() == Some(true);
+    // A reply's permalink names its thread: .../p1700000000000200?thread_ts=1700000000.000100
+    let thread_ts = attachment["from_url"]
+        .as_str()
+        .and_then(|url| url.split_once("thread_ts="))
+        .map(|(_, rest)| rest.split('&').next().unwrap_or_default().to_owned())
+        .or_else(|| {
+            attachment["message_blocks"][0]["message"]["thread_ts"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .filter(|ts| !ts.is_empty())
+        .or_else(|| ts.clone().filter(|_| root));
     SharedMessage {
         author,
         avatar_url: attachment["author_icon"].as_str().map(str::to_owned),
-        ts: attachment["ts"]
-            .as_str()
-            .or(attachment["message_blocks"][0]["ts"].as_str())
-            .map(str::to_owned),
+        ts,
         channel_id,
-        in_thread: attachment["is_reply_unfurl"].as_bool() == Some(true)
-            || attachment["is_thread_root_unfurl"].as_bool() == Some(true),
+        in_thread: attachment["is_reply_unfurl"].as_bool() == Some(true) || root,
+        thread_ts,
         footer: attachment["footer"].as_str().map(str::to_owned),
         text: super::block_text::shared_text(attachment),
     }
@@ -530,6 +544,7 @@ mod tests {
                 "author_id": "U2", "author_name": "Mart Bakler",
                 "author_icon": "https://example.test/mart.png",
                 "channel_id": "C9", "ts": "1.5",
+                "from_url": "https://team.slack.com/archives/C9/p1500000?thread_ts=1.0&cid=C9",
                 "text": "flat <@U3> fallback",
                 "message_blocks": [{"channel": "C9", "ts": "1.5", "message": {"blocks": [
                     {"type": "rich_text", "elements": [{"type": "rich_text_section", "elements": [
@@ -549,6 +564,7 @@ mod tests {
                 ts: Some("1.5".into()),
                 channel_id: Some("C9".into()),
                 in_thread: true,
+                thread_ts: Some("1.0".into()),
                 footer: None,
                 text: "<@U3> Out of interest".into(),
             }]

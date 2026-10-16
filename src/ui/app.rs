@@ -25,6 +25,7 @@ use crate::ui::message_view::{
 };
 use crate::ui::outbox::{Outbox, SendRequest};
 use crate::ui::quick_switcher::{QuickSwitcher, SwitcherOutcome};
+use crate::ui::share_dialog::{ShareDialog, ShareOutcome};
 use crate::ui::theme;
 use crate::ui::todos::Todos;
 
@@ -111,6 +112,7 @@ struct ChatApp {
     revision: u64,
     switcher: Option<QuickSwitcher>,
     picker: Option<EmojiPicker>,
+    share: Option<ShareDialog>,
     image_viewer: Option<ImageViewer>,
     dock: DockBadge,
     realtime: Option<Arc<dyn RealtimeSource>>,
@@ -125,6 +127,11 @@ enum UiEvent {
     MessageSent(SendRequest, Result<String, SlackError>),
     Downloaded(String, Result<std::path::PathBuf, SlackError>),
     ImageCopied(Result<egui::ColorImage, SlackError>),
+    ShareLinked {
+        destination: Conversation,
+        comment: String,
+        link: Result<String, SlackError>,
+    },
     MessageEdited {
         list: ComposeTarget,
         ts: String,
@@ -153,6 +160,7 @@ impl eframe::App for ChatApp {
             || !input.focused
             || self.switcher.is_some()
             || self.picker.is_some()
+            || self.share.is_some()
             || self.image_viewer.is_some()
         {
             return;
@@ -218,6 +226,7 @@ impl eframe::App for ChatApp {
         self.history_navigation(ui.ctx());
         self.quick_switcher(ui.ctx());
         self.emoji_picker(ui.ctx());
+        self.share_dialog(ui.ctx());
         if let Some(viewer) = &self.image_viewer {
             let (close, click) = viewer.show(ui.ctx(), &mut self.images);
             let attachment = viewer.attachment().clone();
@@ -230,8 +239,10 @@ impl eframe::App for ChatApp {
                 Some(AttachmentClick::View) | None => {}
             }
         }
-        let modal_open =
-            self.switcher.is_some() || self.picker.is_some() || self.image_viewer.is_some();
+        let modal_open = self.switcher.is_some()
+            || self.picker.is_some()
+            || self.share.is_some()
+            || self.image_viewer.is_some();
         ui.add_enabled_ui(!modal_open, |ui| {
             let sidebar_max = (ui.available_width() * 0.3).clamp(180.0, 360.0);
             egui::Panel::left("sidebar")
@@ -381,6 +392,7 @@ impl ChatApp {
             revision: 0,
             switcher: None,
             picker: None,
+            share: None,
             image_viewer: None,
             dock: DockBadge::default(),
             realtime,
@@ -591,6 +603,7 @@ impl ChatApp {
     fn quick_switcher(&mut self, ctx: &egui::Context) {
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::P)) {
             self.picker = None;
+            self.share = None;
             self.image_viewer = None;
             self.switcher = Some(QuickSwitcher::new());
         }
@@ -638,6 +651,28 @@ impl ChatApp {
                         reaction.name == name && reaction.user_ids.contains(&workspace.self_user_id)
                     });
                 self.set_reaction(picker.conversation_id, picker.ts, name, !mine);
+            }
+        }
+    }
+
+    fn share_dialog(&mut self, ctx: &egui::Context) {
+        let (Some(share), Some(workspace)) = (&mut self.share, &self.workspace) else {
+            return;
+        };
+        match share.show(ctx, &workspace.conversations) {
+            ShareOutcome::Open => {}
+            ShareOutcome::Closed => self.share = None,
+            ShareOutcome::Share {
+                destination,
+                comment,
+            } => {
+                let share = self.share.take().unwrap();
+                self.status = Some(format!("Sharing to {}…", conversation_label(&destination)));
+                self.spawn(move |service| UiEvent::ShareLinked {
+                    destination,
+                    comment,
+                    link: service.permalink(&share.conversation_id, &share.ts),
+                });
             }
         }
     }
@@ -1073,7 +1108,11 @@ impl ChatApp {
     }
 
     fn history_navigation(&mut self, ctx: &egui::Context) {
-        if self.switcher.is_some() || self.picker.is_some() || self.image_viewer.is_some() {
+        if self.switcher.is_some()
+            || self.picker.is_some()
+            || self.share.is_some()
+            || self.image_viewer.is_some()
+        {
             return;
         }
         let (back, forward) = ctx.input_mut(|input| {
@@ -1161,6 +1200,30 @@ impl ChatApp {
                             .cloned()
                             .collect()
                     });
+                self.thread = Some(ThreadView {
+                    target: target.clone(),
+                    messages,
+                    error: None,
+                });
+                self.load_messages(target);
+            }
+            MessageAction::Share(ts) => {
+                self.picker = None;
+                self.share = Some(ShareDialog::new(conversation_id, ts));
+            }
+            MessageAction::OpenShare {
+                conversation_id,
+                ts,
+            } => {
+                let target = ComposeTarget {
+                    conversation_id,
+                    thread_ts: Some(ts),
+                };
+                let messages = self
+                    .history_cache
+                    .get(&target)
+                    .map(|(_, messages)| messages.clone())
+                    .unwrap_or_default();
                 self.thread = Some(ThreadView {
                     target: target.clone(),
                     messages,
@@ -1523,6 +1586,33 @@ impl ChatApp {
                         Err(error) => format!("Could not copy the image: {error}"),
                     });
                 }
+                UiEvent::ShareLinked {
+                    destination,
+                    comment,
+                    link,
+                } => match link {
+                    Ok(link) => {
+                        // Slack unfurls a message link as the shared-message card.
+                        let text = if comment.is_empty() {
+                            link
+                        } else {
+                            format!("{comment}\n{link}")
+                        };
+                        self.status =
+                            Some(format!("Shared to {}", conversation_label(&destination)));
+                        self.queue_message(
+                            ComposeTarget {
+                                conversation_id: destination.id,
+                                thread_ts: None,
+                            },
+                            text,
+                            Vec::new(),
+                        );
+                    }
+                    Err(error) => {
+                        self.status = Some(format!("Could not share the message: {error}"));
+                    }
+                },
                 UiEvent::Downloaded(name, result) => {
                     self.status = Some(match result {
                         Ok(path) => format!("Saved {name} to {}", path.display()),
@@ -1931,6 +2021,54 @@ mod tests {
             conversation_id: id.into(),
             thread_ts: None,
         }
+    }
+
+    #[test]
+    fn sharing_a_message_posts_its_link_with_a_comment() {
+        let mut app = app();
+        let ctx = app.ctx.clone();
+        let (send_requests, requests) = channel();
+        app.send_requests = send_requests;
+        let ts = app.service.messages("C1").unwrap()[0].ts.clone();
+        app.message_action(target("C1"), MessageAction::Share(ts.clone()));
+        let enter = |pressed| egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        for events in [
+            vec![],
+            vec![egui::Event::Text("design".into())],
+            vec![enter(true), enter(false)],
+            vec![],
+            vec![egui::Event::Text("look".into())],
+            vec![enter(true)],
+        ] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    focused: true,
+                    ..Default::default()
+                },
+                |ui| app.share_dialog(ui.ctx()),
+            );
+            output.textures_delta.clear();
+        }
+        assert!(app.share.is_none(), "sharing closes the dialog");
+        let event = app.receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        app.sender.send(event).unwrap();
+        app.drain_events();
+        let request = requests.try_recv().expect("the share is sent");
+        assert_eq!(request.target, target("C2"));
+        assert_eq!(
+            request.text,
+            format!(
+                "look\nhttps://demo.slack.com/archives/C1/p{}",
+                ts.replace('.', "")
+            )
+        );
     }
 
     #[test]

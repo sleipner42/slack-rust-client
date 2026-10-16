@@ -64,7 +64,10 @@ impl EmojiPicker {
                             "joy",
                             "pray",
                         ] {
-                            if emoji_button(ui, name, "", false, emoji, images).clicked() {
+                            if emoji_button(ui, name, "", false, emoji, images)
+                                .on_hover_text(format!(":{name}:"))
+                                .clicked()
+                            {
                                 chosen = Some(name.to_string());
                             }
                         }
@@ -86,7 +89,10 @@ impl EmojiPicker {
                             .spacing([8.0, 8.0])
                             .show(ui, |ui| {
                                 for (index, name) in results.iter().enumerate() {
-                                    if emoji_button(ui, name, "", false, emoji, images).clicked() {
+                                    if emoji_button(ui, name, "", false, emoji, images)
+                                        .on_hover_text(format!(":{name}:"))
+                                        .clicked()
+                                    {
                                         chosen = Some(name.clone());
                                     }
                                     if index % 8 == 7 {

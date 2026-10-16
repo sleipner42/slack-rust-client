@@ -657,6 +657,17 @@ impl SlackGateway for SlackHttpGateway {
         }
     }
 
+    fn permalink(&self, conversation_id: &str, ts: &str) -> Result<String, SlackError> {
+        let body = self.call(
+            "chat.getPermalink",
+            &[("channel", conversation_id), ("message_ts", ts)],
+        )?;
+        body["permalink"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| SlackError("Slack returned no link for this message.".into()))
+    }
+
     fn mark_read(&self, conversation_id: &str, ts: &str) -> Result<(), SlackError> {
         self.call(
             "conversations.mark",

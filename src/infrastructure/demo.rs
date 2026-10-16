@@ -372,6 +372,13 @@ impl SlackGateway for DemoGateway {
         }
         Ok(ts)
     }
+    fn permalink(&self, conversation_id: &str, ts: &str) -> Result<String, SlackError> {
+        Ok(format!(
+            "https://demo.slack.com/archives/{conversation_id}/p{}",
+            ts.replace('.', "")
+        ))
+    }
+
     fn update_message(
         &self,
         conversation_id: &str,
