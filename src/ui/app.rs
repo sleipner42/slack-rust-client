@@ -11,6 +11,7 @@ use crate::application::chat_service::{ChatService, DisplayMessage, Workspace};
 use crate::application::live_updates::{LiveStatus, spawn_live_updates};
 use crate::domain::gateway::RealtimeSource;
 use crate::domain::model::{Conversation, LiveEvent, ReadState, SlackError, ts_seconds};
+use crate::domain::notify::should_notify;
 use crate::domain::sidebar::{SidebarInput, build_sidebar};
 use crate::domain::unread::{record_incoming, record_read};
 use crate::ui::activity::Activity;
@@ -117,6 +118,9 @@ struct ChatApp {
     dock: DockBadge,
     realtime: Option<Arc<dyn RealtimeSource>>,
     live_connected: bool,
+    /// Messages already notified, and when the app started: replays never notify.
+    notified: HashSet<String>,
+    started: f64,
 }
 
 enum UiEvent {
@@ -127,6 +131,10 @@ enum UiEvent {
     MessageSent(SendRequest, Result<String, SlackError>),
     Downloaded(String, Result<std::path::PathBuf, SlackError>),
     ImageCopied(Result<egui::ColorImage, SlackError>),
+    OpenFromNotification {
+        conversation_id: String,
+        thread_ts: Option<String>,
+    },
     ShareLinked {
         destination: Conversation,
         comment: String,
@@ -397,6 +405,8 @@ impl ChatApp {
             dock: DockBadge::default(),
             realtime,
             live_connected: false,
+            notified: HashSet::new(),
+            started: chrono::Utc::now().timestamp() as f64,
         };
         app.load_workspace();
         app
@@ -667,7 +677,6 @@ impl ChatApp {
                 comment,
             } => {
                 let share = self.share.take().unwrap();
-                self.status = Some(format!("Sharing to {}…", conversation_label(&destination)));
                 self.spawn(move |service| UiEvent::ShareLinked {
                     destination,
                     comment,
@@ -1250,7 +1259,6 @@ impl ChatApp {
             return;
         };
         let name = attachment.name;
-        self.status = Some(format!("Downloading {name}…"));
         self.spawn(move |service| {
             let result = service
                 .download_file(&url)
@@ -1263,7 +1271,6 @@ impl ChatApp {
         let Some(url) = attachment.full_url.or(attachment.preview_url) else {
             return;
         };
-        self.status = Some(format!("Copying {}…", attachment.name));
         self.spawn(move |service| {
             UiEvent::ImageCopied(service.download(&url).and_then(|bytes| {
                 let image = image::load_from_memory(&bytes)
@@ -1373,7 +1380,7 @@ impl ChatApp {
                 edit.saving = false;
                 edit.error = Some(error.to_string());
             } else {
-                self.status = Some(format!("Could not edit the message: {error}"));
+                notify(&format!("Could not edit the message: {error}"));
             }
             return;
         }
@@ -1577,15 +1584,13 @@ impl ChatApp {
                     text,
                     result,
                 } => self.finish_edit(list, ts, text, result),
-                UiEvent::ImageCopied(result) => {
-                    self.status = Some(match result {
-                        Ok(image) => {
-                            self.ctx.copy_image(image);
-                            "Image copied to the clipboard".into()
-                        }
-                        Err(error) => format!("Could not copy the image: {error}"),
-                    });
-                }
+                UiEvent::ImageCopied(result) => match result {
+                    Ok(image) => {
+                        self.ctx.copy_image(image);
+                        notify("Image copied to the clipboard");
+                    }
+                    Err(error) => notify(&format!("Could not copy the image: {error}")),
+                },
                 UiEvent::ShareLinked {
                     destination,
                     comment,
@@ -1598,8 +1603,7 @@ impl ChatApp {
                         } else {
                             format!("{comment}\n{link}")
                         };
-                        self.status =
-                            Some(format!("Shared to {}", conversation_label(&destination)));
+                        notify(&format!("Shared to {}", conversation_label(&destination)));
                         self.queue_message(
                             ComposeTarget {
                                 conversation_id: destination.id,
@@ -1610,15 +1614,21 @@ impl ChatApp {
                         );
                     }
                     Err(error) => {
-                        self.status = Some(format!("Could not share the message: {error}"));
+                        notify(&format!("Could not share the message: {error}"));
                     }
                 },
-                UiEvent::Downloaded(name, result) => {
-                    self.status = Some(match result {
-                        Ok(path) => format!("Saved {name} to {}", path.display()),
-                        Err(error) => format!("Could not download {name}: {error}"),
-                    });
-                }
+                UiEvent::Downloaded(name, result) => match result {
+                    Ok(path) => crate::infrastructure::notifications::show(
+                        APP_TITLE,
+                        &format!("Saved {name} to {}", path.display()),
+                        show_in_folder(path),
+                    ),
+                    Err(error) => notify(&format!("Could not download {name}: {error}")),
+                },
+                UiEvent::OpenFromNotification {
+                    conversation_id,
+                    thread_ts,
+                } => self.open_from_notification(&conversation_id, thread_ts),
                 UiEvent::ReactionSet {
                     conversation_id,
                     ts,
@@ -1628,7 +1638,7 @@ impl ChatApp {
                     self.pending_reactions
                         .remove(&(conversation_id.clone(), ts, name));
                     if let Err(error) = result {
-                        self.status = Some(error.to_string());
+                        notify(&error.to_string());
                     }
                     self.refresh_conversation(&conversation_id);
                 }
@@ -1645,9 +1655,7 @@ impl ChatApp {
                             self.revision += 1;
                             self.rebuild_sidebar();
                         }
-                        Err(error) => {
-                            self.status = Some(format!("Could not mark conversation read: {error}"))
-                        }
+                        Err(error) => notify(&format!("Could not mark conversation read: {error}")),
                     }
                 }
                 UiEvent::Counts(revision, result) => {
@@ -1719,6 +1727,7 @@ impl ChatApp {
                 message,
                 is_broadcast,
             } => {
+                self.notify_message(&conversation_id, &message);
                 if !message.is_thread_reply() || is_broadcast {
                     if let Some(workspace) = &mut self.workspace {
                         let direct = workspace
@@ -1833,6 +1842,114 @@ impl ChatApp {
             .is_some_and(|conversation| conversation.id == conversation_id)
     }
 
+    /// Show a desktop notification for a new direct message or mention, unless
+    /// it is already on screen in the focused window.
+    fn notify_message(&mut self, conversation_id: &str, message: &crate::domain::model::Message) {
+        let Some(workspace) = &self.workspace else {
+            return;
+        };
+        let conversation = workspace
+            .conversations
+            .iter()
+            .find(|conversation| conversation.id == conversation_id)
+            .cloned();
+        let direct = conversation.as_ref().is_some_and(Conversation::is_direct)
+            || conversation_id.starts_with('D');
+        if !should_notify(
+            message,
+            direct,
+            workspace.muted.contains(conversation_id),
+            &workspace.self_user_id,
+        ) || ts_seconds(&message.ts) < self.started
+        {
+            return;
+        }
+        let root = message
+            .is_thread_reply()
+            .then(|| message.thread_ts.clone())
+            .flatten();
+        let thread_open = self.thread.as_ref().is_some_and(|thread| {
+            thread.target.conversation_id == conversation_id
+                && thread.target.thread_ts.as_ref() == Some(root.as_ref().unwrap_or(&message.ts))
+        });
+        let timeline_open = root.is_none()
+            && self.is_selected(conversation_id)
+            && !self.activity_open
+            && !self.todos_open;
+        if self.ctx.input(|input| input.focused) && (thread_open || timeline_open)
+            || !self
+                .notified
+                .insert(format!("{conversation_id}:{}", message.ts))
+        {
+            return;
+        }
+        let place = conversation
+            .filter(|conversation| !conversation.is_direct())
+            .map(|conversation| conversation_label(&conversation));
+        let message = message.clone();
+        let conversation_id = conversation_id.to_owned();
+        let sender = self.sender.clone();
+        let ctx = self.ctx.clone();
+        let service = Arc::clone(&self.service);
+        thread::spawn(move || {
+            let display = service.display(&message);
+            let mut body = crate::domain::message_text::plain_text(&display.blocks);
+            if body.trim().is_empty() {
+                body = match (display.shares.first(), display.attachments.len()) {
+                    (Some(share), _) => crate::domain::message_text::plain_text(&share.blocks),
+                    (None, 0) => String::new(),
+                    (None, 1) => format!("Sent {}", display.attachments[0].name),
+                    (None, files) => format!("Sent {files} files"),
+                };
+            }
+            let mut title = match place {
+                Some(place) => format!("{} in {place}", display.author),
+                None => display.author.clone(),
+            };
+            if root.is_some() {
+                title.push_str(" · thread");
+            }
+            crate::infrastructure::notifications::show(
+                &title,
+                &body,
+                Some(Box::new(move || {
+                    let _ = sender.send(UiEvent::OpenFromNotification {
+                        conversation_id,
+                        thread_ts: root,
+                    });
+                    ctx.request_repaint();
+                })),
+            );
+        });
+    }
+
+    fn open_from_notification(&mut self, conversation_id: &str, thread_ts: Option<String>) {
+        let Some(conversation) = self.workspace.as_ref().and_then(|workspace| {
+            workspace
+                .conversations
+                .iter()
+                .find(|conversation| conversation.id == conversation_id)
+                .cloned()
+        }) else {
+            return;
+        };
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        self.switcher = None;
+        self.picker = None;
+        self.share = None;
+        self.image_viewer = None;
+        self.select(conversation);
+        match thread_ts {
+            Some(root) => {
+                self.message_action(target_of(conversation_id), MessageAction::OpenThread(root))
+            }
+            None => {
+                self.thread = None;
+                self.composer_focus = Some(target_of(conversation_id));
+            }
+        }
+    }
+
     fn spawn(&self, job: impl FnOnce(&ChatService) -> UiEvent + Send + 'static) {
         let service = Arc::clone(&self.service);
         let sender = self.sender.clone();
@@ -1842,6 +1959,31 @@ impl ChatApp {
             ctx.request_repaint();
         });
     }
+}
+
+fn target_of(conversation_id: &str) -> ComposeTarget {
+    ComposeTarget {
+        conversation_id: conversation_id.into(),
+        thread_ts: None,
+    }
+}
+
+const APP_TITLE: &str = "Better Slack";
+
+/// An app status, such as a finished download, shown as a desktop notification.
+fn notify(text: &str) {
+    crate::infrastructure::notifications::show(APP_TITLE, text, None);
+}
+
+/// Clicking the "Saved …" notification opens the folder (Linux only).
+fn show_in_folder(path: std::path::PathBuf) -> Option<Box<dyn FnOnce() + Send>> {
+    if !cfg!(all(unix, not(target_os = "macos"))) {
+        return None;
+    }
+    let folder = path.parent()?.to_owned();
+    Some(Box::new(move || {
+        let _ = std::process::Command::new("xdg-open").arg(folder).spawn();
+    }))
 }
 
 fn push_history(stack: &mut Vec<Conversation>, conversation: Conversation) {
@@ -2021,6 +2163,53 @@ mod tests {
             conversation_id: id.into(),
             thread_ts: None,
         }
+    }
+
+    #[test]
+    fn direct_messages_notify_unless_already_on_screen() {
+        let mut app = app();
+        let ctx = app.ctx.clone();
+        let message = |ts: &str, text: &str| crate::domain::model::Message {
+            client_msg_id: None,
+            ts: ts.into(),
+            author: crate::domain::model::Author::User("U2".into()),
+            text: text.into(),
+            thread_ts: None,
+            reply_count: 0,
+            reactions: vec![],
+            attachments: vec![],
+            shares: vec![],
+            edited: false,
+        };
+        let now = chrono::Utc::now().timestamp() + 1;
+        let focus = |focused| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    focused,
+                    ..Default::default()
+                },
+                |_| {},
+            );
+            output.textures_delta.clear();
+        };
+        focus(true);
+        app.selected = Some(conversation(&app, "D1"));
+        app.notify_message("D1", &message(&format!("{now}.1"), "hi"));
+        assert!(app.notified.is_empty(), "the open DM is already on screen");
+        app.notify_message("C1", &message(&format!("{now}.2"), "chatter"));
+        assert!(app.notified.is_empty(), "plain channel messages stay quiet");
+        app.notify_message("C1", &message(&format!("{now}.3"), "<!here> deploy"));
+        app.notify_message("C1", &message(&format!("{now}.3"), "<!here> deploy"));
+        assert_eq!(app.notified.len(), 1, "mentions notify once");
+        app.notify_message("D1", &message("1.0", "old replay"));
+        assert_eq!(
+            app.notified.len(),
+            1,
+            "messages from before startup stay quiet"
+        );
+        focus(false);
+        app.notify_message("D1", &message(&format!("{now}.4"), "hi"));
+        assert_eq!(app.notified.len(), 2, "an unfocused window notifies");
     }
 
     #[test]
