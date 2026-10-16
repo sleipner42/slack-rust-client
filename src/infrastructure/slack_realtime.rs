@@ -43,25 +43,35 @@ impl RealtimeSource for SlackRealtime {
     fn listen(&self, on_event: &mut dyn FnMut(LiveEvent)) -> Result<(), SlackError> {
         let mut socket = self.connect()?;
         let mut last_ping = Instant::now();
+        let mut last_frame = Instant::now();
         let mut next_id: u64 = 1;
         loop {
             match socket.read() {
                 Ok(Frame::Text(text)) => {
-                    if let Some(event) = serde_json::from_str::<Value>(&text)
-                        .ok()
+                    last_frame = Instant::now();
+                    let frame = serde_json::from_str::<Value>(&text).ok();
+                    if frame
                         .as_ref()
-                        .and_then(parse_live_event)
+                        .is_some_and(|frame| frame["type"] == "goodbye")
                     {
+                        return Err(SlackError(String::from("realtime server is restarting")));
+                    }
+                    if let Some(event) = frame.as_ref().and_then(parse_live_event) {
                         on_event(event);
                     }
                 }
                 Ok(Frame::Close(_)) => {
                     return Err(SlackError(String::from("realtime connection closed")));
                 }
-                Ok(_) => {}
+                Ok(_) => last_frame = Instant::now(),
                 Err(tungstenite::Error::Io(error))
                     if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
                 Err(error) => return Err(to_error(error)),
+            }
+            // Slack answers every ping; silence means a dead connection, which
+            // after sleep or a network change can otherwise go unnoticed for long.
+            if last_frame.elapsed() >= SILENCE_LIMIT {
+                return Err(SlackError(String::from("realtime connection went silent")));
             }
             if last_ping.elapsed() >= PING_INTERVAL {
                 let ping = json!({ "id": next_id, "type": "ping" }).to_string();
@@ -92,3 +102,4 @@ fn to_error(error: impl std::fmt::Display) -> SlackError {
 const ORIGIN: &str = "https://app.slack.com";
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 const PING_INTERVAL: Duration = Duration::from_secs(25);
+const SILENCE_LIMIT: Duration = Duration::from_secs(70);

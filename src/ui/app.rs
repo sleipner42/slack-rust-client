@@ -207,8 +207,13 @@ impl eframe::App for ChatApp {
         if let Some(todos) = &mut self.todos {
             todos.poll();
         }
-        if let Some(activity) = &mut self.activity {
+        let fresh = self.activity.as_mut().map_or_else(Vec::new, |activity| {
             activity.poll();
+            activity.refresh(self.activity_open);
+            activity.take_fresh()
+        });
+        for row in fresh {
+            self.notify_activity(row);
         }
         self.images.poll();
         self.poll();
@@ -1868,19 +1873,7 @@ impl ChatApp {
             .is_thread_reply()
             .then(|| message.thread_ts.clone())
             .flatten();
-        let thread_open = self.thread.as_ref().is_some_and(|thread| {
-            thread.target.conversation_id == conversation_id
-                && thread.target.thread_ts.as_ref() == Some(root.as_ref().unwrap_or(&message.ts))
-        });
-        let timeline_open = root.is_none()
-            && self.is_selected(conversation_id)
-            && !self.activity_open
-            && !self.todos_open;
-        if self.ctx.input(|input| input.focused) && (thread_open || timeline_open)
-            || !self
-                .notified
-                .insert(format!("{conversation_id}:{}", message.ts))
-        {
+        if !self.should_announce(conversation_id, root.as_ref(), &message.ts) {
             return;
         }
         let place = conversation
@@ -1888,8 +1881,7 @@ impl ChatApp {
             .map(|conversation| conversation_label(&conversation));
         let message = message.clone();
         let conversation_id = conversation_id.to_owned();
-        let sender = self.sender.clone();
-        let ctx = self.ctx.clone();
+        let open = self.notification_opener(conversation_id, root.clone());
         let service = Arc::clone(&self.service);
         thread::spawn(move || {
             let display = service.display(&message);
@@ -1909,18 +1901,75 @@ impl ChatApp {
             if root.is_some() {
                 title.push_str(" · thread");
             }
-            crate::infrastructure::notifications::show(
-                &title,
-                &body,
-                Some(Box::new(move || {
-                    let _ = sender.send(UiEvent::OpenFromNotification {
-                        conversation_id,
-                        thread_ts: root,
-                    });
-                    ctx.request_repaint();
-                })),
-            );
+            crate::infrastructure::notifications::show(&title, &body, Some(open));
         });
+    }
+
+    /// Notify about a mention or direct message Slack's activity feed reports;
+    /// this also covers group mentions and anything the live connection missed.
+    fn notify_activity(&mut self, row: crate::application::activity::DisplayActivity) {
+        let item = &row.item;
+        let broadcast = matches!(item.kind.as_str(), "at_channel" | "at_everyone");
+        if self
+            .workspace
+            .as_ref()
+            .is_none_or(|workspace| broadcast && workspace.muted.contains(&item.conversation_id))
+        {
+            return;
+        }
+        let root = item.thread_ts.clone().filter(|root| *root != item.ts);
+        if !self.should_announce(&item.conversation_id, root.as_ref(), &item.ts) {
+            return;
+        }
+        let mut title = if item.conversation_id.starts_with('D') {
+            row.actor.clone()
+        } else {
+            format!("{} in {}", row.actor, row.source)
+        };
+        if root.is_some() {
+            title.push_str(" · thread");
+        }
+        let body = row
+            .message
+            .as_ref()
+            .map(|message| crate::domain::message_text::plain_text(&message.blocks))
+            .filter(|body| !body.trim().is_empty())
+            .unwrap_or_else(|| row.preview.clone());
+        let open = self.notification_opener(item.conversation_id.clone(), root);
+        thread::spawn(move || {
+            crate::infrastructure::notifications::show(&title, &body, Some(open))
+        });
+    }
+
+    /// False when the message is already on screen in the focused window, or
+    /// was announced before; otherwise remembers it as announced.
+    fn should_announce(&mut self, conversation_id: &str, root: Option<&String>, ts: &str) -> bool {
+        let thread_open = self.thread.as_ref().is_some_and(|thread| {
+            thread.target.conversation_id == conversation_id
+                && thread.target.thread_ts.as_deref() == Some(root.map_or(ts, String::as_str))
+        });
+        let timeline_open = root.is_none()
+            && self.is_selected(conversation_id)
+            && !self.activity_open
+            && !self.todos_open;
+        !(self.ctx.input(|input| input.focused) && (thread_open || timeline_open))
+            && self.notified.insert(format!("{conversation_id}:{ts}"))
+    }
+
+    fn notification_opener(
+        &self,
+        conversation_id: String,
+        thread_ts: Option<String>,
+    ) -> Box<dyn FnOnce() + Send> {
+        let sender = self.sender.clone();
+        let ctx = self.ctx.clone();
+        Box::new(move || {
+            let _ = sender.send(UiEvent::OpenFromNotification {
+                conversation_id,
+                thread_ts,
+            });
+            ctx.request_repaint();
+        })
     }
 
     fn open_from_notification(&mut self, conversation_id: &str, thread_ts: Option<String>) {

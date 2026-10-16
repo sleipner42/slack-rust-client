@@ -38,6 +38,12 @@ struct List {
 
 pub struct Activity {
     query: ActivityQuery,
+    /// Something happened since the feed behind the sidebar dot last loaded.
+    feed_stale: bool,
+    /// Unread mentions and direct messages already reported by `take_fresh`.
+    announced: HashSet<(String, String)>,
+    primed: bool,
+    fresh: Vec<DisplayActivity>,
     lists: HashMap<ActivityQuery, List>,
     pub selected: Option<DisplayActivity>,
     dirty: bool,
@@ -56,6 +62,10 @@ impl Activity {
         let (sender, receiver) = channel();
         let mut activity = Self {
             query: ActivityQuery::default(),
+            feed_stale: false,
+            announced: HashSet::new(),
+            primed: false,
+            fresh: Vec::new(),
             lists: HashMap::new(),
             selected: None,
             dirty: false,
@@ -85,6 +95,51 @@ impl Activity {
 
     pub fn invalidate(&mut self) {
         self.dirty = true;
+        self.feed_stale = true;
+    }
+
+    /// Keep the feed behind the sidebar dot and notifications current. Leaves a
+    /// list the user is reading alone; its Refresh button covers that.
+    pub fn refresh(&mut self, showing: bool) {
+        let query = ActivityQuery::default();
+        if showing && self.query == query {
+            return;
+        }
+        let Some(list) = self.lists.get(&query) else {
+            return;
+        };
+        let due = if self.feed_stale {
+            STALE_REFRESH
+        } else {
+            IDLE_REFRESH
+        };
+        if !list.busy && list.updated.is_some_and(|time| time.elapsed() >= due) {
+            self.feed_stale = false;
+            self.load_query(query, String::new());
+        }
+    }
+
+    /// Unread mentions and direct messages that arrived since the last call.
+    pub fn take_fresh(&mut self) -> Vec<DisplayActivity> {
+        std::mem::take(&mut self.fresh)
+    }
+
+    fn announce(&mut self) {
+        let Some(list) = self.lists.get(&ActivityQuery::default()) else {
+            return;
+        };
+        for row in &list.items {
+            if row.item.unread
+                && NOTIFY_KINDS.contains(&row.item.kind.as_str())
+                && self
+                    .announced
+                    .insert((row.item.key.clone(), row.item.feed_ts.clone()))
+                && self.primed
+            {
+                self.fresh.push(row.clone());
+            }
+        }
+        self.primed = true;
     }
 
     fn select(&mut self, row: DisplayActivity) {
@@ -129,15 +184,21 @@ impl Activity {
     }
 
     fn load(&mut self, cursor: String) {
-        let list = self.lists.entry(self.query).or_default();
+        self.load_query(self.query, cursor);
+    }
+
+    fn load_query(&mut self, query: ActivityQuery, cursor: String) {
+        let list = self.lists.entry(query).or_default();
         if list.busy {
             return;
         }
         list.busy = true;
         list.error = None;
-        self.dirty = false;
+        if query == self.query {
+            self.dirty = false;
+        }
         let request = Request {
-            query: self.query,
+            query,
             cursor,
             read_revision: self.read_revision,
         };
@@ -255,6 +316,11 @@ impl Activity {
                             list.loaded = true;
                             list.updated = Some(Instant::now());
                             list.failed_cursor.clear();
+                            if request.query == ActivityQuery::default()
+                                && request.cursor.is_empty()
+                            {
+                                self.announce();
+                            }
                         }
                         Err(error) => {
                             list.error = Some(error);
@@ -372,6 +438,18 @@ impl Activity {
     }
 }
 
+/// Slack's default desktop notifications: mentions and direct messages.
+const NOTIFY_KINDS: [&str; 7] = [
+    "at_user",
+    "at_user_group",
+    "at_channel",
+    "at_everyone",
+    "keyword",
+    "dm",
+    "bot_dm_bundle",
+];
+const STALE_REFRESH: Duration = Duration::from_secs(15);
+const IDLE_REFRESH: Duration = Duration::from_secs(90);
 const ROW_HEIGHT: f32 = 82.0;
 
 fn activity_row(
@@ -568,6 +646,10 @@ mod tests {
         let (sender, receiver) = channel();
         Activity {
             query: ActivityQuery::default(),
+            feed_stale: false,
+            announced: HashSet::new(),
+            primed: false,
+            fresh: Vec::new(),
             lists: HashMap::new(),
             selected: None,
             dirty: false,
@@ -641,6 +723,81 @@ mod tests {
         assert_eq!(reads.len(), 2);
         assert!(reads.iter().any(|item| item.key == "1"));
         assert!(reads.iter().any(|item| item.key == "2"));
+    }
+
+    #[test]
+    fn new_unread_mentions_and_dms_are_reported_once_but_not_the_backlog() {
+        let mut activity = activity();
+        let all = ActivityQuery::default();
+        let item = |key: &str, kind: &str, feed_ts: &str, unread: bool| {
+            let mut row = row(key);
+            row.item.kind = kind.into();
+            row.item.feed_ts = feed_ts.into();
+            row.item.unread = unread;
+            row
+        };
+        let load = |activity: &mut Activity, items: Vec<DisplayActivity>| {
+            activity
+                .sender
+                .send(ResultEvent::Loaded(
+                    Request {
+                        query: all,
+                        cursor: String::new(),
+                        read_revision: 0,
+                    },
+                    Ok(ActivityPage {
+                        items,
+                        next_cursor: String::new(),
+                        warning: None,
+                    }),
+                ))
+                .unwrap();
+            activity.poll();
+            activity
+                .take_fresh()
+                .into_iter()
+                .map(|row| row.item.key)
+                .collect::<Vec<_>>()
+        };
+        let backlog = item("old", "at_user", "1.0", true);
+        assert!(load(&mut activity, vec![backlog.clone()]).is_empty());
+        let fresh = vec![
+            item("mention", "at_user", "2.0", true),
+            item("dm", "dm", "3.0", true),
+            item("thread", "thread_v2", "4.0", true),
+            item("read", "at_user_group", "5.0", false),
+            backlog.clone(),
+        ];
+        assert_eq!(load(&mut activity, fresh.clone()), ["mention", "dm"]);
+        assert!(
+            load(&mut activity, fresh).is_empty(),
+            "report each item once"
+        );
+        let again = item("mention", "at_user", "6.0", true);
+        assert_eq!(load(&mut activity, vec![again]), ["mention"]);
+    }
+
+    #[test]
+    fn the_sidebar_feed_refreshes_in_the_background_unless_it_is_being_read() {
+        let mut activity = activity();
+        let all = ActivityQuery::default();
+        activity.lists.insert(
+            all,
+            List {
+                updated: Some(Instant::now() - STALE_REFRESH),
+                ..Default::default()
+            },
+        );
+        activity.refresh(false);
+        assert!(!activity.lists[&all].busy, "nothing new happened yet");
+        activity.invalidate();
+        activity.refresh(true);
+        assert!(
+            !activity.lists[&all].busy,
+            "the open list waits for Refresh"
+        );
+        activity.refresh(false);
+        assert!(activity.lists[&all].busy);
     }
 
     #[test]
