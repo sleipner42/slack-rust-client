@@ -91,6 +91,10 @@ struct ChatApp {
     activity_open: bool,
     activity: Option<Activity>,
     drafts: HashMap<ComposeTarget, Draft>,
+    draft_store: crate::infrastructure::draft_store::DraftStore,
+    /// Draft texts as last saved, to save only when something changed.
+    saved_drafts: crate::infrastructure::draft_store::Drafts,
+    drafts_checked: Instant,
     paste_shortcut: crate::infrastructure::clipboard::PasteShortcut,
     composer_focus: Option<ComposeTarget>,
     outbox: Outbox,
@@ -207,6 +211,7 @@ impl eframe::App for ChatApp {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
+        self.save_drafts();
         if let Some(todos) = &mut self.todos {
             todos.poll();
         }
@@ -387,6 +392,11 @@ impl ChatApp {
             activity_open: false,
             activity: None,
             drafts: HashMap::new(),
+            draft_store: crate::infrastructure::draft_store::DraftStore::new(
+                crate::infrastructure::draft_store::DraftStore::default_path(),
+            ),
+            saved_drafts: Default::default(),
+            drafts_checked: Instant::now(),
             paste_shortcut: Default::default(),
             composer_focus: None,
             outbox: Outbox::default(),
@@ -416,6 +426,7 @@ impl ChatApp {
             notified: HashSet::new(),
             started: chrono::Utc::now().timestamp() as f64,
         };
+        app.restore_drafts();
         app.load_workspace();
         app
     }
@@ -1838,6 +1849,48 @@ impl ChatApp {
         }
     }
 
+    /// Draft texts worth keeping, keyed like the drafts file.
+    fn draft_texts(&self) -> crate::infrastructure::draft_store::Drafts {
+        self.drafts
+            .iter()
+            .filter(|(_, draft)| !draft.text.trim().is_empty())
+            .map(|(target, draft)| {
+                (
+                    (target.conversation_id.clone(), target.thread_ts.clone()),
+                    draft.text.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Persist changed drafts about once a second.
+    fn save_drafts(&mut self) {
+        if self.drafts_checked.elapsed() < DRAFT_SAVE_INTERVAL {
+            return;
+        }
+        self.drafts_checked = Instant::now();
+        let texts = self.draft_texts();
+        if texts != self.saved_drafts {
+            // A failed write is retried on the next change.
+            if self.draft_store.save(&texts).is_ok() {
+                self.saved_drafts = texts;
+            }
+        }
+    }
+
+    fn restore_drafts(&mut self) {
+        for ((conversation_id, thread_ts), text) in self.draft_store.load() {
+            self.drafts
+                .entry(ComposeTarget {
+                    conversation_id,
+                    thread_ts,
+                })
+                .or_default()
+                .text = text;
+        }
+        self.saved_drafts = self.draft_texts();
+    }
+
     fn rebuild_sidebar(&mut self) {
         if let Some(workspace) = &mut self.workspace {
             workspace.sidebar = build_sidebar(&SidebarInput {
@@ -2137,6 +2190,7 @@ const UNREAD_SHORTCUT: &str = "⌘⇧U";
 #[cfg(not(target_os = "macos"))]
 const UNREAD_SHORTCUT: &str = "Ctrl+Shift+U";
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
+const DRAFT_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 const COUNTS_INTERVAL: Duration = Duration::from_secs(30);
 
 fn needs_attention(workspace: &Workspace, id: &str) -> bool {
