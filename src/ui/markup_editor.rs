@@ -175,6 +175,12 @@ pub fn restore_focus(ui: &egui::Ui, id: egui::Id) {
     }
 }
 
+/// Give the editor focus back next frame, after a click elsewhere took it.
+pub fn request_refocus(ctx: &egui::Context, id: egui::Id) {
+    ctx.data_mut(|data| data.insert_temp(refocus_id(id), true));
+    ctx.request_repaint();
+}
+
 fn refocus_id(id: egui::Id) -> egui::Id {
     id.with("refocus")
 }

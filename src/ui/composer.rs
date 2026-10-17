@@ -19,12 +19,21 @@ pub struct Draft {
     ime_active: bool,
 }
 
-pub fn composer(ui: &mut egui::Ui, target: &ComposeTarget, draft: &mut Draft, hint: &str) -> bool {
+pub fn composer(
+    ui: &mut egui::Ui,
+    target: &ComposeTarget,
+    draft: &mut Draft,
+    hint: &str,
+    mut completion: Option<super::emoji_completion::EmojiCompletion<'_>>,
+) -> bool {
     draft.attachments.poll(ui.ctx());
     let id = target.editor_id();
     super::markup_editor::restore_focus(ui, id);
     let focused = ui.is_enabled() && ui.memory(|memory| memory.has_focus(id));
     if focused {
+        if let Some(completion) = &completion {
+            super::emoji_completion::keys(ui, id, &mut draft.text, completion.emoji);
+        }
         super::markup_editor::shortcuts(ui, id, &mut draft.text);
     }
     let enter = if focused {
@@ -60,6 +69,15 @@ pub fn composer(ui: &mut egui::Ui, target: &ComposeTarget, draft: &mut Draft, hi
                         ))
                         .show(ui);
                     super::markup_editor::spelling(ui, &output, id, &mut draft.text);
+                    if let Some(completion) = &mut completion {
+                        super::emoji_completion::popup(
+                            ui,
+                            &output,
+                            id,
+                            &mut draft.text,
+                            completion,
+                        );
+                    }
                 });
             draft.attachments.show(ui);
             ui.add_space(8.0);
@@ -139,7 +157,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    composer(ui, &target, &mut draft, "Message");
+                    composer(ui, &target, &mut draft, "Message", None);
                 },
             );
             output.textures_delta.clear();
@@ -228,7 +246,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    composer(ui, &target, &mut draft, "Message");
+                    composer(ui, &target, &mut draft, "Message", None);
                 },
             );
             output.textures_delta.clear();
@@ -293,6 +311,76 @@ mod tests {
     }
 
     #[test]
+    fn typing_a_colon_suggests_custom_emoji_and_enter_inserts_instead_of_sending() {
+        use crate::application::chat_service::ChatService;
+        use crate::application::emoji_catalog::EmojiCatalog;
+        use crate::infrastructure::demo::DemoGateway;
+        let ctx = egui::Context::default();
+        crate::ui::theme::apply(&ctx);
+        let emoji = EmojiCatalog::new(std::collections::HashMap::from([(
+            "partyparrot".to_string(),
+            "https://e/parrot.gif".to_string(),
+        )]));
+        let mut images = crate::ui::images::ImageCache::new(
+            std::sync::Arc::new(ChatService::new(std::sync::Arc::new(DemoGateway::new()))),
+            ctx.clone(),
+        );
+        let target = ComposeTarget {
+            conversation_id: "C1".into(),
+            thread_ts: None,
+        };
+        let mut draft = Draft::default();
+        ctx.memory_mut(|memory| memory.request_focus(target.editor_id()));
+        let mut sent = false;
+        let mut frame = |events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    focused: true,
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(500.0, 400.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.add_space(250.0);
+                    let completion = crate::ui::emoji_completion::EmojiCompletion {
+                        emoji: &emoji,
+                        images: &mut images,
+                    };
+                    sent |= composer(ui, &target, &mut draft, "Message", Some(completion));
+                },
+            );
+            output.textures_delta.clear();
+            let shown = output.shapes.iter().any(|clipped| {
+                matches!(&clipped.shape,
+                    egui::Shape::Text(text) if text.galley.text() == ":partyparrot:")
+            });
+            (shown, draft.text.clone(), sent)
+        };
+        let enter = |pressed| egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![]);
+        frame(vec![egui::Event::Text("hi :partyp".into())]);
+        assert!(frame(vec![]).0, "the custom emoji is suggested");
+        frame(vec![enter(true), enter(false)]);
+        let (shown, text, sent_now) = frame(vec![]);
+        assert_eq!(text, "hi :partyparrot: ");
+        assert!(!sent_now, "Enter picked the emoji instead of sending");
+        assert!(!shown, "the list closes after inserting");
+        assert!(
+            frame(vec![enter(true), enter(false)]).2,
+            "the next Enter sends"
+        );
+    }
+
+    #[test]
     fn multiline_editor_accepts_shift_enter_and_submits_without_an_extra_newline() {
         let ctx = egui::Context::default();
         let target = ComposeTarget {
@@ -318,7 +406,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    submitted = composer(ui, &target, &mut draft, "Message");
+                    submitted = composer(ui, &target, &mut draft, "Message", None);
                 },
             );
             output.textures_delta.clear();

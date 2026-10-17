@@ -338,7 +338,11 @@ fn message_row(
                         .filter(|edit| edit.ts == message.ts)
                     {
                         Some(edit) => {
-                            if let Some(edit_action) = edit_box(ui, edit) {
+                            let completion = super::emoji_completion::EmojiCompletion {
+                                emoji: context.emoji,
+                                images: context.images,
+                            };
+                            if let Some(edit_action) = edit_box(ui, edit, completion) {
                                 action = Some(edit_action);
                             }
                         }
@@ -605,11 +609,16 @@ fn can_edit(message: &DisplayMessage, context: &MessageContext<'_>) -> bool {
             .is_none_or(|edit| edit.ts != message.ts)
 }
 
-fn edit_box(ui: &mut egui::Ui, edit: &mut MessageEdit) -> Option<MessageAction> {
+fn edit_box(
+    ui: &mut egui::Ui,
+    edit: &mut MessageEdit,
+    mut completion: super::emoji_completion::EmojiCompletion<'_>,
+) -> Option<MessageAction> {
     let id = egui::Id::new(("message_edit", &edit.ts));
     super::markup_editor::restore_focus(ui, id);
     let mut action = None;
     if ui.memory(|memory| memory.has_focus(id)) && !edit.saving {
+        super::emoji_completion::keys(ui, id, &mut edit.text, completion.emoji);
         super::markup_editor::shortcuts(ui, id, &mut edit.text);
         let (submit, cancel) = ui.input_mut(|input| {
             (
@@ -658,6 +667,7 @@ fn edit_box(ui: &mut egui::Ui, edit: &mut MessageEdit) -> Option<MessageAction> 
                 .interactive(!edit.saving)
                 .show(ui);
             super::markup_editor::spelling(ui, &output, id, &mut edit.text);
+            super::emoji_completion::popup(ui, &output, id, &mut edit.text, &mut completion);
         });
     ui.horizontal(|ui| {
         if ui

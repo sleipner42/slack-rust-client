@@ -1039,7 +1039,14 @@ impl ChatApp {
                 ui.ctx().request_repaint();
             }
         }
-        if composer(ui, target, draft, hint) {
+        let completion =
+            self.workspace
+                .as_ref()
+                .map(|workspace| crate::ui::emoji_completion::EmojiCompletion {
+                    emoji: &workspace.emoji,
+                    images: &mut self.images,
+                });
+        if composer(ui, target, draft, hint, completion) {
             let text = std::mem::take(&mut draft.text);
             let files = draft.attachments.take();
             self.queue_message(target.clone(), text, files);

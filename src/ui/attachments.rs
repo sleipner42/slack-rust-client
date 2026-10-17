@@ -388,7 +388,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    submitted = composer(ui, &target, &mut draft, "Reply");
+                    submitted = composer(ui, &target, &mut draft, "Reply", None);
                 },
             );
             output.textures_delta.clear();

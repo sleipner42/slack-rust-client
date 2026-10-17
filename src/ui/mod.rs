@@ -3,6 +3,7 @@ pub mod app;
 mod attachments;
 mod composer;
 mod dock;
+mod emoji_completion;
 mod emoji_picker;
 mod image_viewer;
 mod images;
