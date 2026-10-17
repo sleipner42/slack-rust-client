@@ -101,6 +101,10 @@ pub trait SlackGateway: Send + Sync {
             "Editing messages is unavailable for this workspace.".into(),
         ))
     }
+    /// How often and recently the user picked each emoji in Slack.
+    fn emoji_usage(&self) -> Result<crate::domain::emoji_usage::EmojiUsage, SlackError> {
+        Ok(Default::default())
+    }
     /// The user's unsent drafts that belong to a conversation or thread.
     fn drafts(&self) -> Result<Vec<RemoteDraft>, SlackError> {
         Ok(Vec::new())

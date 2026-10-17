@@ -11,11 +11,30 @@ pub enum EmojiGlyph {
 #[derive(Clone, Debug, Default)]
 pub struct EmojiCatalog {
     custom: HashMap<String, String>,
+    /// The user's most frecent emoji, best first.
+    frequent: Vec<String>,
 }
 
 impl EmojiCatalog {
     pub fn new(custom: HashMap<String, String>) -> Self {
-        Self { custom }
+        Self {
+            custom,
+            frequent: Vec::new(),
+        }
+    }
+
+    pub fn set_frequent(&mut self, ranked: Vec<String>) {
+        self.frequent = ranked;
+    }
+
+    /// The most used emoji that still exist, for the picker's first row.
+    pub fn frequent(&self, limit: usize) -> Vec<String> {
+        self.frequent
+            .iter()
+            .filter(|name| !matches!(self.resolve(name), EmojiGlyph::Missing(_)))
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     pub fn resolve(&self, name: &str) -> EmojiGlyph {
@@ -64,9 +83,17 @@ impl EmojiCatalog {
             .filter(|name| needle.is_empty() || name.to_lowercase().contains(&needle))
             .collect();
         if !needle.is_empty() {
+            let rank: HashMap<&str, usize> = self
+                .frequent
+                .iter()
+                .enumerate()
+                .map(|(index, name)| (name.as_str(), index))
+                .collect();
+            // Prefix matches first, the ones the user reaches for leading.
             names.sort_by_key(|name| {
                 (
                     !name.to_lowercase().starts_with(&needle),
+                    rank.get(name.as_str()).copied().unwrap_or(usize::MAX),
                     name.len(),
                     name.clone(),
                 )
@@ -189,6 +216,22 @@ mod tests {
             parse_pack(b"TWEMOJI1\x01\x00\x00\x00\x02ab\x00\x00\x00\x00\x01\x00\x00\x00Z").unwrap();
         assert_eq!(index["ab"], (0, 1));
         assert_eq!(data, b"Z");
+    }
+
+    #[test]
+    fn frequently_used_emoji_lead_the_list_and_search() {
+        let mut catalog = EmojiCatalog::new(HashMap::from([(
+            "rocket-down".to_string(),
+            "https://e/r.png".to_string(),
+        )]));
+        catalog.set_frequent(vec![
+            "rocket-down".into(),
+            "removed_emoji".into(),
+            "rose".into(),
+        ]);
+        assert_eq!(catalog.frequent(8), ["rocket-down", "rose"]);
+        let found = catalog.search("ro", 4);
+        assert_eq!(&found[..2], ["rocket-down", "rose"], "{found:?}");
     }
 
     #[test]

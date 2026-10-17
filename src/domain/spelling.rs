@@ -76,7 +76,7 @@ fn word_in(text: &str, token: Range<usize>) -> Option<Range<usize>> {
 }
 
 /// `:emoji_name:` shortcodes.
-fn emoji_names(text: &str) -> Vec<Range<usize>> {
+pub fn emoji_names(text: &str) -> Vec<Range<usize>> {
     let bytes = text.as_bytes();
     let mut ranges = Vec::new();
     let mut index = 0;

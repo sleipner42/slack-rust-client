@@ -554,6 +554,13 @@ impl SlackGateway for SlackHttpGateway {
         Ok(parse_muted(&body["prefs"]))
     }
 
+    fn emoji_usage(&self) -> Result<crate::domain::emoji_usage::EmojiUsage, SlackError> {
+        let body = self.call("users.prefs.get", &[])?;
+        Ok(crate::infrastructure::slack_parsing::parse_emoji_usage(
+            &body["prefs"],
+        ))
+    }
+
     fn custom_emoji(&self) -> Result<HashMap<String, String>, SlackError> {
         let body = self.call("emoji.list", &[])?;
         Ok(parse_custom_emoji(&body["emoji"]))

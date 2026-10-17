@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod emoji_usage;
 pub mod gateway;
 pub mod markup;
 pub mod message_text;

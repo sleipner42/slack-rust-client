@@ -67,6 +67,7 @@ mod tests {
 
     fn workspace() -> Workspace {
         Workspace {
+            emoji_usage: Default::default(),
             self_user_id: "me".into(),
             conversations: vec![
                 Conversation {

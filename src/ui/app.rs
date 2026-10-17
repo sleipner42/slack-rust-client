@@ -99,6 +99,8 @@ struct ChatApp {
     ),
     drafts_checked: Instant,
     draft_sync: crate::application::draft_sync::DraftSync,
+    /// Emoji picked in this app; Slack's own history is in the workspace.
+    local_emoji: crate::domain::emoji_usage::EmojiUsage,
     /// When Slack's drafts were last requested, while none have loaded.
     drafts_requested: Option<Instant>,
     paste_shortcut: crate::infrastructure::clipboard::PasteShortcut,
@@ -409,6 +411,7 @@ impl ChatApp {
             saved_drafts: Default::default(),
             drafts_checked: Instant::now(),
             draft_sync: Default::default(),
+            local_emoji: crate::infrastructure::emoji_usage_store::load(),
             drafts_requested: None,
             paste_shortcut: Default::default(),
             composer_focus: None,
@@ -1092,6 +1095,19 @@ impl ChatApp {
         text: String,
         files: Vec<crate::domain::uploads::UploadFile>,
     ) {
+        let used: Vec<String> = crate::domain::spelling::emoji_names(&text)
+            .into_iter()
+            .map(|range| text[range.start + 1..range.end - 1].to_owned())
+            .filter(|name| {
+                self.workspace.as_ref().is_some_and(|workspace| {
+                    !matches!(
+                        workspace.emoji.resolve(name),
+                        crate::application::emoji_catalog::EmojiGlyph::Missing(_)
+                    )
+                })
+            })
+            .collect();
+        self.record_emoji(used);
         let id = uuid::Uuid::new_v4().to_string();
         let mut message = self
             .service
@@ -1489,7 +1505,32 @@ impl ChatApp {
         self.refresh_conversation(&list.conversation_id);
     }
 
+    /// Remember emoji the user picked, for the frequently used list.
+    fn record_emoji(&mut self, names: impl IntoIterator<Item = String>) {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut any = false;
+        for name in names {
+            self.local_emoji.record(&name, now);
+            any = true;
+        }
+        if any {
+            crate::infrastructure::emoji_usage_store::save(&self.local_emoji);
+            self.refresh_frequent_emoji();
+        }
+    }
+
+    fn refresh_frequent_emoji(&mut self) {
+        if let Some(workspace) = &mut self.workspace {
+            let now = chrono::Utc::now().timestamp_millis();
+            let ranked = workspace.emoji_usage.merged(&self.local_emoji).ranked(now);
+            workspace.emoji.set_frequent(ranked);
+        }
+    }
+
     fn set_reaction(&mut self, conversation_id: String, ts: String, name: String, add: bool) {
+        if add {
+            self.record_emoji([name.clone()]);
+        }
         if !self
             .pending_reactions
             .insert((conversation_id.clone(), ts.clone(), name.clone()))
@@ -1617,6 +1658,7 @@ impl ChatApp {
                                 ));
                             }
                             self.workspace = Some(workspace);
+                            self.refresh_frequent_emoji();
                             self.status = None;
                             if let Some(source) = self.realtime.take() {
                                 let sender = self.sender.clone();
@@ -1731,6 +1773,7 @@ impl ChatApp {
                 UiEvent::EmojiLoaded(result) => {
                     if let (Ok(emoji), Some(workspace)) = (result, &mut self.workspace) {
                         workspace.emoji = emoji;
+                        self.refresh_frequent_emoji();
                     }
                 }
                 UiEvent::VideoOpened(attachment, result) => {

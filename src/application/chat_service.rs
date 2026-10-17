@@ -71,6 +71,8 @@ pub struct Workspace {
     pub read_states: HashMap<String, ReadState>,
     pub muted: HashSet<String>,
     pub emoji: EmojiCatalog,
+    /// Emoji use as Slack's own clients recorded it.
+    pub emoji_usage: crate::domain::emoji_usage::EmojiUsage,
 }
 
 pub struct ChatService {
@@ -315,6 +317,7 @@ impl ChatService {
         let read_states = self.gateway.read_states().unwrap_or_default();
         let muted = self.gateway.muted_conversations().unwrap_or_default();
         let emoji = EmojiCatalog::new(self.gateway.custom_emoji().unwrap_or_default());
+        let emoji_usage = self.gateway.emoji_usage().unwrap_or_default();
         let sidebar = build_sidebar(&SidebarInput {
             sections: &sections,
             conversations: &conversations,
@@ -329,6 +332,7 @@ impl ChatService {
             read_states,
             muted,
             emoji,
+            emoji_usage,
         })
     }
 

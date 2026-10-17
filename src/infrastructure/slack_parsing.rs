@@ -184,6 +184,37 @@ pub fn parse_read_states(body: &Value) -> HashMap<String, ReadState> {
         .collect()
 }
 
+/// Emoji entries ("E" + name) of Slack's `frecency_jumper` preference, which
+/// also tracks channels and people under other prefixes.
+pub fn parse_emoji_usage(prefs: &Value) -> crate::domain::emoji_usage::EmojiUsage {
+    use crate::domain::emoji_usage::{EmojiUsage, EmojiUse};
+    let jumper: Value = prefs["frecency_jumper"]
+        .as_str()
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or(Value::Null);
+    let emoji = jumper
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(id, entry)| {
+            let name = id.strip_prefix('E')?;
+            let visits: Vec<i64> = entry["visits"]
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_i64)
+                .collect();
+            Some((
+                name.to_string(),
+                EmojiUse {
+                    count: entry["count"].as_u64().unwrap_or(visits.len() as u64) as u32,
+                    visits,
+                },
+            ))
+        })
+        .collect();
+    EmojiUsage { emoji }
+}
+
 pub fn parse_muted(prefs: &Value) -> HashSet<String> {
     let mut muted: HashSet<String> = prefs["muted_channels"]
         .as_str()
@@ -735,6 +766,21 @@ mod tests {
         assert!(matches!(sent, Some(LiveEvent::DraftDeleted { ref id }) if id == "Dr1"));
         let deleted = parse_live_event(&json!({"type": "draft_delete", "draft_id": "Dr2"}));
         assert!(matches!(deleted, Some(LiveEvent::DraftDeleted { ref id }) if id == "Dr2"));
+    }
+
+    #[test]
+    fn emoji_frecency_comes_from_the_jumper_preference() {
+        let prefs = json!({
+            "frecency_jumper": json!({
+                "Erocket": {"id": "Erocket", "count": 10, "visits": [1761241041152_i64, 1775058940667_i64]},
+                "C123": {"id": "C123", "count": 99, "visits": [1775058940667_i64]},
+            }).to_string()
+        });
+        let usage = parse_emoji_usage(&prefs);
+        assert_eq!(usage.emoji.len(), 1, "channels are not emoji");
+        assert_eq!(usage.emoji["rocket"].count, 10);
+        assert_eq!(usage.emoji["rocket"].visits.len(), 2);
+        assert!(parse_emoji_usage(&json!({})).emoji.is_empty());
     }
 
     #[test]
