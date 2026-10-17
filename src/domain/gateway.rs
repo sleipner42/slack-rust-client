@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::domain::model::{
-    Conversation, LiveEvent, Message, ReadState, SavedMessage, SavedTodo, SavedTodoPage,
-    SidebarSection, SlackError, UserProfile,
+    Conversation, LiveEvent, Message, ReadState, RemoteDraft, SavedMessage, SavedTodo,
+    SavedTodoPage, SidebarSection, SlackError, UserProfile,
 };
 
 pub trait SlackGateway: Send + Sync {
@@ -100,6 +100,23 @@ pub trait SlackGateway: Send + Sync {
         Err(SlackError(
             "Editing messages is unavailable for this workspace.".into(),
         ))
+    }
+    /// The user's unsent drafts that belong to a conversation or thread.
+    fn drafts(&self) -> Result<Vec<RemoteDraft>, SlackError> {
+        Ok(Vec::new())
+    }
+    /// Create or update the draft for a conversation or thread.
+    fn save_draft(
+        &self,
+        _existing: Option<&RemoteDraft>,
+        _conversation_id: &str,
+        _thread_ts: Option<&str>,
+        _text: &str,
+    ) -> Result<RemoteDraft, SlackError> {
+        Err(SlackError("Drafts do not sync for this workspace.".into()))
+    }
+    fn delete_draft(&self, _id: &str) -> Result<(), SlackError> {
+        Ok(())
     }
     /// A link to the message that Slack unfurls as a shared message.
     fn permalink(&self, _conversation_id: &str, _ts: &str) -> Result<String, SlackError> {

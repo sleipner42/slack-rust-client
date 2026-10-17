@@ -101,6 +101,20 @@ pub struct Message {
     pub edited: bool,
 }
 
+/// An unsent message saved in Slack, so it follows the user between devices.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemoteDraft {
+    pub id: String,
+    pub conversation_id: String,
+    pub thread_ts: Option<String>,
+    /// Composer markup.
+    pub text: String,
+    /// Files attached in another Slack client; kept when the text changes.
+    pub file_ids: Vec<String>,
+    /// Slack's last change, in Unix seconds.
+    pub updated: f64,
+}
+
 /// A message shared into another one, or unfurled from a pasted message link.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SharedMessage {
@@ -182,6 +196,12 @@ pub enum LiveEvent {
     },
     /// A custom emoji was added, renamed or removed.
     EmojiChanged,
+    /// A draft was saved, here or in another Slack client.
+    DraftSaved(RemoteDraft),
+    /// A draft was sent or discarded.
+    DraftDeleted {
+        id: String,
+    },
 }
 
 #[derive(Clone, Debug)]

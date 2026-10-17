@@ -10,12 +10,12 @@ use serde_json::Value;
 
 use crate::domain::gateway::SlackGateway;
 use crate::domain::model::{
-    Attachment, Author, Conversation, Credentials, Message, ReadState, SavedMessage, SavedTodo,
-    SavedTodoPage, SidebarSection, SlackError, UserProfile,
+    Attachment, Author, Conversation, Credentials, Message, ReadState, RemoteDraft, SavedMessage,
+    SavedTodo, SavedTodoPage, SidebarSection, SlackError, UserProfile,
 };
 use crate::infrastructure::slack_parsing::{
     next_cursor, order_sections, parse_attachment, parse_conversations, parse_custom_emoji,
-    parse_message, parse_muted, parse_read_states, parse_saved_todos, parse_section,
+    parse_draft, parse_message, parse_muted, parse_read_states, parse_saved_todos, parse_section,
     parse_user_profile,
 };
 
@@ -657,6 +657,90 @@ impl SlackGateway for SlackHttpGateway {
         }
     }
 
+    fn drafts(&self) -> Result<Vec<RemoteDraft>, SlackError> {
+        let body = self.call("drafts.list", &[("is_active", "true"), ("limit", "100")])?;
+        Ok(body["drafts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(parse_draft)
+            .collect())
+    }
+
+    fn save_draft(
+        &self,
+        existing: Option<&RemoteDraft>,
+        conversation_id: &str,
+        thread_ts: Option<&str>,
+        text: &str,
+    ) -> Result<RemoteDraft, SlackError> {
+        let destinations = match thread_ts {
+            Some(ts) => serde_json::json!([{"channel_id": conversation_id, "thread_ts": ts}]),
+            None => serde_json::json!([{"channel_id": conversation_id}]),
+        }
+        .to_string();
+        let blocks = crate::infrastructure::draft_blocks::draft_blocks(text).to_string();
+        let update = |draft: &RemoteDraft| {
+            let file_ids = serde_json::json!(draft.file_ids).to_string();
+            self.call(
+                "drafts.update",
+                &[
+                    ("draft_id", draft.id.as_str()),
+                    // Slack rejects an update not newer than its own last change.
+                    ("client_last_updated_ts", &now_ts()),
+                    ("blocks", &blocks),
+                    ("destinations", &destinations),
+                    ("file_ids", &file_ids),
+                    ("is_from_composer", "false"),
+                ],
+            )
+        };
+        let create = || {
+            self.call(
+                "drafts.create",
+                &[
+                    ("blocks", &blocks),
+                    ("client_msg_id", &uuid::Uuid::new_v4().to_string()),
+                    ("destinations", &destinations),
+                    ("file_ids", "[]"),
+                    ("is_from_composer", "false"),
+                ],
+            )
+        };
+        let body = match existing {
+            Some(draft) => match update(draft) {
+                Err(error) if error.0.ends_with("draft_not_found") => create(),
+                result => result,
+            },
+            None => match create() {
+                // Another client made one meanwhile; Slack keeps one per destination.
+                Err(error) if error.0.ends_with("attached_draft_exists") => {
+                    let current = self
+                        .drafts()?
+                        .into_iter()
+                        .find(|draft| {
+                            draft.conversation_id == conversation_id
+                                && draft.thread_ts.as_deref() == thread_ts
+                        })
+                        .ok_or(error)?;
+                    update(&current)
+                }
+                result => result,
+            },
+        }?;
+        parse_draft(&body["draft"]).ok_or_else(|| SlackError("Slack returned no draft.".into()))
+    }
+
+    fn delete_draft(&self, id: &str) -> Result<(), SlackError> {
+        match self.call(
+            "drafts.delete",
+            &[("draft_id", id), ("client_last_updated_ts", &now_ts())],
+        ) {
+            Err(error) if error.0.ends_with("draft_not_found") => Ok(()),
+            result => result.map(|_| ()),
+        }
+    }
+
     fn permalink(&self, conversation_id: &str, ts: &str) -> Result<String, SlackError> {
         let body = self.call(
             "chat.getPermalink",
@@ -804,6 +888,14 @@ const REPLIES_LIMIT: &str = "200";
 const MAX_ATTEMPTS: usize = 4;
 const DEFAULT_RETRY_SECONDS: u64 = 2;
 const SLACK_HOST_SUFFIXES: [&str; 2] = [".slack.com", ".slack-edge.com"];
+
+/// Now as a Slack timestamp, for draft changes.
+fn now_ts() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}.{:06}", now.as_secs(), now.subsec_micros())
+}
 
 #[cfg(test)]
 mod upload_tests {

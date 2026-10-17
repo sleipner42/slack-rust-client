@@ -332,6 +332,35 @@ impl ChatService {
         })
     }
 
+    pub fn drafts(&self) -> Result<Vec<crate::domain::model::RemoteDraft>, SlackError> {
+        self.gateway.drafts()
+    }
+
+    /// Send a composer change to Slack: the saved draft, or `None` once deleted.
+    pub fn push_draft(
+        &self,
+        push: &super::draft_sync::Push,
+    ) -> Result<Option<crate::domain::model::RemoteDraft>, SlackError> {
+        match push {
+            super::draft_sync::Push::Save {
+                key: (conversation_id, thread_ts),
+                existing,
+                text,
+            } => self
+                .gateway
+                .save_draft(
+                    existing.as_ref(),
+                    conversation_id,
+                    thread_ts.as_deref(),
+                    text,
+                )
+                .map(Some),
+            super::draft_sync::Push::Delete { id, .. } => {
+                self.gateway.delete_draft(id).map(|()| None)
+            }
+        }
+    }
+
     /// The workspace's custom emoji, fetched again.
     pub fn emoji_catalog(&self) -> Result<EmojiCatalog, SlackError> {
         Ok(EmojiCatalog::new(self.gateway.custom_emoji()?))

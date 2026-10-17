@@ -92,9 +92,15 @@ struct ChatApp {
     activity: Option<Activity>,
     drafts: HashMap<ComposeTarget, Draft>,
     draft_store: crate::infrastructure::draft_store::DraftStore,
-    /// Draft texts as last saved, to save only when something changed.
-    saved_drafts: crate::infrastructure::draft_store::Drafts,
+    /// Drafts as last written to disk, to write only when something changed.
+    saved_drafts: (
+        crate::infrastructure::draft_store::Drafts,
+        crate::infrastructure::draft_store::Synced,
+    ),
     drafts_checked: Instant,
+    draft_sync: crate::application::draft_sync::DraftSync,
+    /// When Slack's drafts were last requested, while none have loaded.
+    drafts_requested: Option<Instant>,
     paste_shortcut: crate::infrastructure::clipboard::PasteShortcut,
     composer_focus: Option<ComposeTarget>,
     outbox: Outbox,
@@ -161,6 +167,11 @@ enum UiEvent {
     Marked(String, String, Result<(), SlackError>),
     Counts(u64, Result<HashMap<String, ReadState>, SlackError>),
     EmojiLoaded(Result<crate::application::emoji_catalog::EmojiCatalog, SlackError>),
+    DraftsListed(Result<Vec<crate::domain::model::RemoteDraft>, SlackError>),
+    DraftPushed(
+        crate::application::draft_sync::Push,
+        Result<Option<crate::domain::model::RemoteDraft>, SlackError>,
+    ),
     Live(LiveStatus),
 }
 
@@ -397,6 +408,8 @@ impl ChatApp {
             ),
             saved_drafts: Default::default(),
             drafts_checked: Instant::now(),
+            draft_sync: Default::default(),
+            drafts_requested: None,
             paste_shortcut: Default::default(),
             composer_focus: None,
             outbox: Outbox::default(),
@@ -549,6 +562,13 @@ impl ChatApp {
             .filter(|_| !self.todos_open && !self.activity_open)
             .map(|conversation| conversation.id.as_str());
         let mut clicked = None;
+        // Conversations with an unsent message, marked with a pencil as in Slack.
+        let drafted: HashSet<&str> = self
+            .drafts
+            .iter()
+            .filter(|(target, draft)| target.thread_ts.is_none() && !draft.text.trim().is_empty())
+            .map(|(target, _)| target.conversation_id.as_str())
+            .collect();
         egui::ScrollArea::vertical()
             .id_salt(("sidebar_scroll", self.unread_only))
             .auto_shrink([false, false])
@@ -572,7 +592,8 @@ impl ChatApp {
                         ui.weak("All caught up");
                     }
                     for conversation in conversations {
-                        if sidebar_row(ui, workspace, conversation, selected) {
+                        let draft = drafted.contains(conversation.id.as_str());
+                        if sidebar_row(ui, workspace, conversation, selected, draft) {
                             clicked = Some(conversation.clone());
                         }
                     }
@@ -616,7 +637,8 @@ impl ChatApp {
                         .show(ui, |ui| {
                             ui.spacing_mut().item_spacing.y = 2.0;
                             for conversation in conversations {
-                                if sidebar_row(ui, workspace, conversation, selected) {
+                                let draft = drafted.contains(conversation.id.as_str());
+                                if sidebar_row(ui, workspace, conversation, selected, draft) {
                                     clicked = Some(conversation.clone());
                                 }
                             }
@@ -1686,6 +1708,26 @@ impl ChatApp {
                     ),
                     Err(error) => notify(&format!("Could not download {name}: {error}")),
                 },
+                UiEvent::DraftsListed(result) => {
+                    // A failure is retried by `save_drafts`; local drafts keep working.
+                    if let Ok(remote) = result {
+                        let texts = self.draft_texts();
+                        for (key, text) in self.draft_sync.load(remote, &texts) {
+                            self.set_draft_text(key, text);
+                        }
+                    }
+                }
+                UiEvent::DraftPushed(push, result) => {
+                    let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+                    let (key, text) = match &push {
+                        crate::application::draft_sync::Push::Save { key, text, .. } => {
+                            (key, text.as_str())
+                        }
+                        crate::application::draft_sync::Push::Delete { key, .. } => (key, ""),
+                    };
+                    self.draft_sync
+                        .pushed(key, text, result.map_err(|_| ()), now);
+                }
                 UiEvent::EmojiLoaded(result) => {
                     if let (Ok(emoji), Some(workspace)) = (result, &mut self.workspace) {
                         workspace.emoji = emoji;
@@ -1794,6 +1836,10 @@ impl ChatApp {
                 self.live_connected = true;
                 self.last_counts = Instant::now() - self.counts_interval();
                 self.last_poll = Instant::now() - self.poll_interval();
+                // Catch draft changes made elsewhere while disconnected.
+                if self.draft_sync.is_loaded() {
+                    self.list_drafts();
+                }
             }
             LiveEvent::MessagePosted {
                 conversation_id,
@@ -1843,6 +1889,18 @@ impl ChatApp {
                 }
                 self.rebuild_sidebar();
             }
+            LiveEvent::DraftSaved(draft) => {
+                let key = (draft.conversation_id.clone(), draft.thread_ts.clone());
+                let local = self.draft_texts().remove(&key).unwrap_or_default();
+                if let Some(text) = self.draft_sync.remote_saved(draft, &local) {
+                    self.set_draft_text(key, text);
+                }
+            }
+            LiveEvent::DraftDeleted { id } => {
+                if let Some(key) = self.draft_sync.remote_deleted(&id, &self.draft_texts()) {
+                    self.set_draft_text(key, String::new());
+                }
+            }
             LiveEvent::EmojiChanged => {
                 self.spawn(|service| UiEvent::EmojiLoaded(service.emoji_catalog()));
             }
@@ -1863,32 +1921,64 @@ impl ChatApp {
             .collect()
     }
 
-    /// Persist changed drafts about once a second.
+    /// About once a second: send paused edits to Slack and keep the drafts
+    /// file current.
     fn save_drafts(&mut self) {
         if self.drafts_checked.elapsed() < DRAFT_SAVE_INTERVAL {
             return;
         }
         self.drafts_checked = Instant::now();
         let texts = self.draft_texts();
-        if texts != self.saved_drafts {
-            // A failed write is retried on the next change.
-            if self.draft_store.save(&texts).is_ok() {
-                self.saved_drafts = texts;
-            }
+        let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+        if self.workspace.is_some()
+            && !self.draft_sync.is_loaded()
+            && self
+                .drafts_requested
+                .is_none_or(|at| at.elapsed() >= DRAFT_LIST_RETRY)
+        {
+            self.list_drafts();
+        }
+        self.draft_sync.observe(&texts, now);
+        for push in self.draft_sync.due(&texts, now) {
+            self.spawn(move |service| {
+                let result = service.push_draft(&push);
+                UiEvent::DraftPushed(push, result)
+            });
+        }
+        let snapshot = (texts, self.draft_sync.synced().clone());
+        // A failed write is retried on the next change.
+        if snapshot != self.saved_drafts && self.draft_store.save(&snapshot.0, &snapshot.1).is_ok()
+        {
+            self.saved_drafts = snapshot;
         }
     }
 
+    fn list_drafts(&mut self) {
+        self.drafts_requested = Some(Instant::now());
+        self.spawn(|service| UiEvent::DraftsListed(service.drafts()));
+    }
+
     fn restore_drafts(&mut self) {
-        for ((conversation_id, thread_ts), text) in self.draft_store.load() {
-            self.drafts
-                .entry(ComposeTarget {
-                    conversation_id,
-                    thread_ts,
-                })
-                .or_default()
-                .text = text;
+        let (texts, synced) = self.draft_store.load();
+        for (key, text) in texts {
+            self.set_draft_text(key, text);
         }
-        self.saved_drafts = self.draft_texts();
+        self.draft_sync = crate::application::draft_sync::DraftSync::new(synced);
+        self.saved_drafts = (self.draft_texts(), self.draft_sync.synced().clone());
+    }
+
+    fn set_draft_text(
+        &mut self,
+        (conversation_id, thread_ts): (String, Option<String>),
+        text: String,
+    ) {
+        self.drafts
+            .entry(ComposeTarget {
+                conversation_id,
+                thread_ts,
+            })
+            .or_default()
+            .text = text;
     }
 
     fn rebuild_sidebar(&mut self) {
@@ -2191,6 +2281,7 @@ const UNREAD_SHORTCUT: &str = "⌘⇧U";
 const UNREAD_SHORTCUT: &str = "Ctrl+Shift+U";
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 const DRAFT_SAVE_INTERVAL: Duration = Duration::from_secs(1);
+const DRAFT_LIST_RETRY: Duration = Duration::from_secs(60);
 const COUNTS_INTERVAL: Duration = Duration::from_secs(30);
 
 fn needs_attention(workspace: &Workspace, id: &str) -> bool {
@@ -2219,6 +2310,7 @@ fn sidebar_row(
     workspace: &Workspace,
     conversation: &Conversation,
     selected: Option<&str>,
+    draft: bool,
 ) -> bool {
     ui.push_id(&conversation.id, |ui| {
         let size = egui::vec2(ui.available_width(), 26.0);
@@ -2249,6 +2341,8 @@ fn sidebar_row(
                 .add_sized([width, 26.0], |ui: &mut egui::Ui| {
                     let dot_id = ui.make_persistent_id("unread_dot");
                     let icon_id = ui.make_persistent_id("conversation_icon");
+                    let pencil_id = ui.make_persistent_id("draft_pencil");
+                    let pencil_size = if draft { 14.0 } else { 0.0 };
                     let output = egui::Button::selectable(
                         selected == Some(&conversation.id),
                         (
@@ -2256,6 +2350,7 @@ fn sidebar_row(
                             egui::Atom::custom(icon_id, egui::vec2(18.0, 18.0)),
                             text.atom_shrink(true),
                             egui::Atom::grow(),
+                            egui::Atom::custom(pencil_id, egui::vec2(pencil_size, 18.0)),
                         ),
                     )
                     .gap(6.0)
@@ -2268,12 +2363,16 @@ fn sidebar_row(
                     if let Some(rect) = output.rect(icon_id) {
                         paint_sidebar_icon(ui, rect, conversation, color);
                     }
+                    if draft && let Some(rect) = output.rect(pencil_id) {
+                        paint_pencil(ui, rect, theme::TEXT_MUTED);
+                    }
                     output.response
                 })
                 .on_hover_text(format!(
-                    "{}{}",
+                    "{}{}{}",
                     conversation.name,
-                    if muted { " · muted" } else { "" }
+                    if muted { " · muted" } else { "" },
+                    if draft { " · draft" } else { "" }
                 ))
                 .clicked();
             if mentions > 0 {
@@ -2300,6 +2399,23 @@ fn sidebar_row(
         .inner
     })
     .inner
+}
+
+/// A small slanted pencil, for conversations with a draft.
+fn paint_pencil(ui: &egui::Ui, rect: egui::Rect, color: egui::Color32) {
+    let center = rect.center();
+    let along = egui::vec2(0.7, -0.7);
+    let across = egui::vec2(0.7, 0.7);
+    let tip = center - along * 5.5;
+    let body_start = tip + along * 2.5;
+    let end = center + along * 5.0;
+    let painter = ui.painter();
+    painter.add(egui::Shape::convex_polygon(
+        vec![tip, body_start + across * 1.6, body_start - across * 1.6],
+        color,
+        egui::Stroke::NONE,
+    ));
+    painter.line_segment([body_start, end], egui::Stroke::new(3.2, color));
 }
 
 #[cfg(test)]
@@ -2864,7 +2980,7 @@ mod tests {
                         .vertical_scroll_offset(offset)
                         .show(ui, |ui| {
                             for conversation in &workspace.conversations {
-                                sidebar_row(ui, &workspace, conversation, None);
+                                sidebar_row(ui, &workspace, conversation, None, false);
                             }
                         })
                         .content_size;

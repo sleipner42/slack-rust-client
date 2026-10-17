@@ -122,6 +122,18 @@ fn block_text(blocks: &Value) -> String {
         .join("\n\n")
 }
 
+/// Slack markup for the rich-text blocks in `blocks`, as the composer writes it.
+pub fn rich_text_markup(blocks: &Value) -> String {
+    blocks
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|block| block["type"] == "rich_text")
+        .map(|block| rich_blocks(&block["elements"], 0))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn text_object(value: &Value) -> String {
     let text = value["text"].as_str().unwrap_or("");
     if value["type"].as_str() == Some("plain_text") {

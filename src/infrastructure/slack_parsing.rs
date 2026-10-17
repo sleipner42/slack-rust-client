@@ -4,7 +4,8 @@ use serde_json::Value;
 
 use crate::domain::model::{
     Attachment, Author, Conversation, ConversationKind, LiveEvent, Message, Reaction, ReadState,
-    SavedTodo, SavedTodoPage, SectionKind, SharedMessage, SidebarSection, SlackError, UserProfile,
+    RemoteDraft, SavedTodo, SavedTodoPage, SectionKind, SharedMessage, SidebarSection, SlackError,
+    UserProfile,
 };
 
 pub fn parse_saved_todos(body: &Value, completed: bool) -> Result<SavedTodoPage, SlackError> {
@@ -133,6 +134,19 @@ pub fn parse_live_event(event: &Value) -> Option<LiveEvent> {
     match event["type"].as_str()? {
         "hello" => Some(LiveEvent::Connected),
         "emoji_changed" => Some(LiveEvent::EmojiChanged),
+        "draft_create" | "draft_update" => Some(match parse_draft(&event["draft"]) {
+            Some(draft) => LiveEvent::DraftSaved(draft),
+            // Sent, scheduled or no longer tied to one conversation.
+            None => LiveEvent::DraftDeleted {
+                id: event["draft"]["id"]
+                    .as_str()
+                    .or(event["draft_id"].as_str())?
+                    .to_string(),
+            },
+        }),
+        "draft_delete" => Some(LiveEvent::DraftDeleted {
+            id: event["draft_id"].as_str()?.to_string(),
+        }),
         "message" => parse_message_event(event),
         "channel_marked" | "group_marked" | "im_marked" | "mpim_marked" => {
             Some(LiveEvent::ConversationMarked {
@@ -292,6 +306,36 @@ pub fn parse_section(raw: &Value) -> Option<SidebarSection> {
                     .collect()
             })
             .unwrap_or_default(),
+    })
+}
+
+/// A draft waiting in one conversation or thread; none for sent, deleted or
+/// scheduled drafts and ones meant for several destinations.
+pub fn parse_draft(draft: &Value) -> Option<RemoteDraft> {
+    if draft["is_sent"] == true
+        || draft["is_deleted"] == true
+        || draft["date_scheduled"].as_i64().unwrap_or(0) > 0
+    {
+        return None;
+    }
+    let [destination] = draft["destinations"].as_array()?.as_slice() else {
+        return None;
+    };
+    Some(RemoteDraft {
+        id: draft["id"].as_str()?.to_string(),
+        conversation_id: destination["channel_id"].as_str()?.to_string(),
+        thread_ts: destination["thread_ts"].as_str().map(str::to_string),
+        text: super::draft_blocks::draft_text(&draft["blocks"]),
+        file_ids: draft["file_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|id| id.as_str().map(str::to_string))
+            .collect(),
+        updated: draft["last_updated_ts"]
+            .as_str()
+            .and_then(|ts| ts.parse().ok())
+            .unwrap_or(0.0),
     })
 }
 
@@ -649,6 +693,48 @@ mod tests {
             reaction,
             Some(LiveEvent::ReactionChanged { added: true, .. })
         ));
+    }
+
+    #[test]
+    fn draft_events_carry_the_composer_text_and_destination() {
+        // Shapes as Slack sent them, ids changed.
+        let saved = parse_live_event(&json!({
+            "type": "draft_update",
+            "draft_id": "Dr1",
+            "draft": {
+                "id": "Dr1",
+                "blocks": [{"type": "rich_text", "block_id": "x", "elements": [{
+                    "type": "rich_text_section",
+                    "elements": [
+                        {"type": "text", "text": "almost "},
+                        {"type": "text", "text": "done", "style": {"bold": true}}
+                    ]
+                }]}],
+                "destinations": [{"channel_id": "C1", "thread_ts": "17.5", "broadcast": false}],
+                "file_ids": ["F1"],
+                "is_deleted": false,
+                "is_sent": false,
+                "date_scheduled": 0,
+                "last_updated_ts": "1792262272.500234"
+            }
+        }));
+        let Some(LiveEvent::DraftSaved(draft)) = saved else {
+            panic!("{saved:?}");
+        };
+        assert_eq!(draft.id, "Dr1");
+        assert_eq!(draft.conversation_id, "C1");
+        assert_eq!(draft.thread_ts.as_deref(), Some("17.5"));
+        assert_eq!(draft.text, "almost *done*");
+        assert_eq!(draft.file_ids, ["F1"]);
+        assert!((draft.updated - 1_792_262_272.5).abs() < 0.01);
+
+        let sent = parse_live_event(&json!({
+            "type": "draft_update",
+            "draft": {"id": "Dr1", "is_sent": true, "destinations": [{"channel_id": "C1"}]}
+        }));
+        assert!(matches!(sent, Some(LiveEvent::DraftDeleted { ref id }) if id == "Dr1"));
+        let deleted = parse_live_event(&json!({"type": "draft_delete", "draft_id": "Dr2"}));
+        assert!(matches!(deleted, Some(LiveEvent::DraftDeleted { ref id }) if id == "Dr2"));
     }
 
     #[test]
