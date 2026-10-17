@@ -332,6 +332,11 @@ impl ChatService {
         })
     }
 
+    /// The workspace's custom emoji, fetched again.
+    pub fn emoji_catalog(&self) -> Result<EmojiCatalog, SlackError> {
+        Ok(EmojiCatalog::new(self.gateway.custom_emoji()?))
+    }
+
     #[cfg(test)]
     pub fn messages(&self, conversation_id: &str) -> Result<Vec<DisplayMessage>, SlackError> {
         self.messages_with_preview(conversation_id, |_| {})

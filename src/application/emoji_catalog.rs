@@ -19,9 +19,20 @@ impl EmojiCatalog {
     }
 
     pub fn resolve(&self, name: &str) -> EmojiGlyph {
-        if let Some(url) = self.custom.get(name) {
-            return EmojiGlyph::Image(url.clone());
+        match self.custom.get(name) {
+            Some(target) => match target.strip_prefix("alias:") {
+                // A workspace name for a standard emoji.
+                Some(standard) => match Self::standard(standard) {
+                    EmojiGlyph::Missing(_) => EmojiGlyph::Missing(name.to_string()),
+                    glyph => glyph,
+                },
+                None => EmojiGlyph::Image(target.clone()),
+            },
+            None => Self::standard(name),
         }
+    }
+
+    fn standard(name: &str) -> EmojiGlyph {
         let (base, tone) = name
             .split_once("::skin-tone-")
             .map_or((name, None), |(base, tone)| {
@@ -182,10 +193,16 @@ mod tests {
 
     #[test]
     fn resolves_standard_custom_and_missing() {
-        let catalog = EmojiCatalog::new(HashMap::from([(
-            "party".to_string(),
-            "https://e/p.gif".to_string(),
-        )]));
+        let catalog = EmojiCatalog::new(HashMap::from([
+            ("party".to_string(), "https://e/p.gif".to_string()),
+            ("yay".to_string(), "alias:tada".to_string()),
+            ("broken".to_string(), "alias:no_such_emoji".to_string()),
+        ]));
+        assert_eq!(catalog.resolve("yay"), EmojiGlyph::Unicode("🎉".into()));
+        assert_eq!(
+            catalog.resolve("broken"),
+            EmojiGlyph::Missing("broken".into())
+        );
         assert_eq!(
             catalog.resolve("thumbsup"),
             EmojiGlyph::Unicode("👍".into())

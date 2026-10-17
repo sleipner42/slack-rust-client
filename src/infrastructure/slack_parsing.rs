@@ -132,6 +132,7 @@ fn parse_share(attachment: &Value) -> SharedMessage {
 pub fn parse_live_event(event: &Value) -> Option<LiveEvent> {
     match event["type"].as_str()? {
         "hello" => Some(LiveEvent::Connected),
+        "emoji_changed" => Some(LiveEvent::EmojiChanged),
         "message" => parse_message_event(event),
         "channel_marked" | "group_marked" | "im_marked" | "mpim_marked" => {
             Some(LiveEvent::ConversationMarked {
@@ -202,7 +203,11 @@ pub fn parse_custom_emoji(emoji: &Value) -> HashMap<String, String> {
             let mut target = value.as_str()?;
             for _ in 0..MAX_ALIAS_DEPTH {
                 match target.strip_prefix(ALIAS_PREFIX) {
-                    Some(alias) => target = entries.get(alias)?.as_str()?,
+                    Some(alias) => match entries.get(alias) {
+                        Some(next) => target = next.as_str()?,
+                        // An alias of a standard emoji, such as alias:tada.
+                        None => return Some((name.clone(), target.to_string())),
+                    },
                     None => break,
                 }
             }
@@ -655,7 +660,11 @@ mod tests {
             emoji.get("yay").map(String::as_str),
             Some("https://e/party.gif")
         );
-        assert!(!emoji.contains_key("ok"));
+        assert_eq!(
+            emoji.get("ok").map(String::as_str),
+            Some("alias:thumbsup"),
+            "aliases of standard emoji resolve in the catalog"
+        );
     }
 }
 

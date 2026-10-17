@@ -180,6 +180,8 @@ pub enum LiveEvent {
         user_id: String,
         added: bool,
     },
+    /// A custom emoji was added, renamed or removed.
+    EmojiChanged,
 }
 
 #[derive(Clone, Debug)]

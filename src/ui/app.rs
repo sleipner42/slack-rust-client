@@ -156,6 +156,7 @@ enum UiEvent {
     },
     Marked(String, String, Result<(), SlackError>),
     Counts(u64, Result<HashMap<String, ReadState>, SlackError>),
+    EmojiLoaded(Result<crate::application::emoji_catalog::EmojiCatalog, SlackError>),
     Live(LiveStatus),
 }
 
@@ -1667,6 +1668,11 @@ impl ChatApp {
                     ),
                     Err(error) => notify(&format!("Could not download {name}: {error}")),
                 },
+                UiEvent::EmojiLoaded(result) => {
+                    if let (Ok(emoji), Some(workspace)) = (result, &mut self.workspace) {
+                        workspace.emoji = emoji;
+                    }
+                }
                 UiEvent::VideoOpened(attachment, result) => {
                     let opening = crate::ui::message_view::video_opening_id(&attachment);
                     self.ctx.data_mut(|data| data.remove_temp::<bool>(opening));
@@ -1818,6 +1824,9 @@ impl ChatApp {
                     );
                 }
                 self.rebuild_sidebar();
+            }
+            LiveEvent::EmojiChanged => {
+                self.spawn(|service| UiEvent::EmojiLoaded(service.emoji_catalog()));
             }
         }
     }
