@@ -252,3 +252,146 @@ pub fn toolbar(ui: &mut egui::Ui, id: egui::Id, text: &mut String) {
         }
     });
 }
+
+/// Underline misspelled words in a shown editor, and offer corrections on a
+/// right click. The word being typed is left alone until the cursor leaves it.
+pub fn spelling(
+    ui: &mut egui::Ui,
+    output: &egui::text_edit::TextEditOutput,
+    id: egui::Id,
+    text: &mut String,
+) {
+    let Some(checker) = crate::infrastructure::spell_checker::get() else {
+        return;
+    };
+    let char_to_byte = |index: usize| {
+        text.char_indices()
+            .nth(index)
+            .map_or(text.len(), |(byte, _)| byte)
+    };
+    let byte_to_char = |byte: usize| {
+        text.get(..byte)
+            .map_or_else(|| text.chars().count(), |before| before.chars().count())
+    };
+    let typing_at = output
+        .cursor_range
+        .filter(|_| output.response.has_focus())
+        .map(|range| char_to_byte(range.primary.index.0));
+    let words = crate::domain::spelling::checkable_words(text);
+    let painter = ui.painter_at(output.text_clip_rect);
+    for word in &words {
+        if typing_at.is_some_and(|at| word.start <= at && at <= word.end)
+            || checker.check(&text[word.clone()])
+        {
+            continue;
+        }
+        let start = output
+            .galley
+            .pos_from_cursor(egui::text::CCursor::new(byte_to_char(word.start)));
+        let end = output
+            .galley
+            .pos_from_cursor(egui::text::CCursor::new(byte_to_char(word.end)));
+        if (start.bottom() - end.bottom()).abs() < 1.0 {
+            let offset = output.galley_pos.to_vec2();
+            squiggle(
+                &painter,
+                start.left() + offset.x..end.left() + offset.x,
+                start.bottom() + offset.y,
+            );
+        }
+    }
+
+    let menu_id = id.with("spelling_menu");
+    if output.response.secondary_clicked() {
+        let target = output.response.interact_pointer_pos().and_then(|pos| {
+            let at = output.galley.cursor_from_pos(pos - output.galley_pos).index;
+            let at = char_to_byte(at.0);
+            let word = words
+                .iter()
+                .find(|word| word.start <= at && at <= word.end)?
+                .clone();
+            let spelled = &text[word.clone()];
+            (!checker.check(spelled)).then(|| SpellingMenu {
+                word: word.clone(),
+                original: spelled.to_owned(),
+                suggestions: checker.suggest(spelled),
+            })
+        });
+        ui.data_mut(|data| match target {
+            Some(target) => {
+                data.insert_temp(menu_id, target);
+            }
+            None => {
+                data.remove_temp::<SpellingMenu>(menu_id);
+            }
+        });
+    }
+    let Some(menu) = ui.data(|data| data.get_temp::<SpellingMenu>(menu_id)) else {
+        return;
+    };
+    let mut choice = None;
+    output.response.context_menu(|ui| {
+        if menu.suggestions.is_empty() {
+            ui.weak("No suggestions");
+        }
+        for suggestion in &menu.suggestions {
+            if ui.button(suggestion).clicked() {
+                choice = Some(Some(suggestion.clone()));
+            }
+        }
+        ui.separator();
+        if ui.button("Add to dictionary").clicked() {
+            checker.add(&menu.original);
+            choice = Some(None);
+        }
+        if ui.button("Ignore").clicked() {
+            checker.ignore(&menu.original);
+            choice = Some(None);
+        }
+        if choice.is_some() {
+            ui.close();
+        }
+    });
+    if let Some(choice) = choice {
+        ui.data_mut(|data| data.remove_temp::<SpellingMenu>(menu_id));
+        let mut cursor = byte_to_char(menu.word.end);
+        // Only replace if the word is still where the menu found it.
+        if let Some(replacement) = choice
+            && text.get(menu.word.clone()) == Some(menu.original.as_str())
+        {
+            cursor = byte_to_char(menu.word.start) + replacement.chars().count();
+            text.replace_range(menu.word.clone(), &replacement);
+        }
+        let mut state = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(cursor),
+            )));
+        state.store(ui.ctx(), id);
+        ui.data_mut(|data| data.insert_temp(refocus_id(id), true));
+        ui.ctx().request_repaint();
+    }
+}
+
+#[derive(Clone, Default)]
+struct SpellingMenu {
+    word: std::ops::Range<usize>,
+    original: String,
+    suggestions: Vec<String>,
+}
+
+fn squiggle(painter: &egui::Painter, x: std::ops::Range<f32>, y: f32) {
+    let points: Vec<egui::Pos2> = (0..)
+        .map(|step| x.start + step as f32 * 2.0)
+        .take_while(|px| *px <= x.end)
+        .enumerate()
+        .map(|(step, px)| egui::pos2(px, y + if step % 2 == 0 { 0.0 } else { -2.0 }))
+        .collect();
+    if points.len() > 1 {
+        painter.add(egui::Shape::line(
+            points,
+            egui::Stroke::new(1.0, theme::SPELLING),
+        ));
+    }
+}

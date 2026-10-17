@@ -35,6 +35,7 @@ pub fn run(
     team_name: String,
     realtime: Option<Arc<dyn RealtimeSource>>,
 ) -> eframe::Result {
+    crate::infrastructure::spell_checker::start_loading();
     let mut wgpu_options = eframe::WgpuConfiguration::default();
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut wgpu_options.wgpu_setup {
         setup.power_preference = eframe::wgpu::PowerPreference::LowPower;

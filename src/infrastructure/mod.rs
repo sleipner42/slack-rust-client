@@ -10,4 +10,5 @@ pub mod notifications;
 pub mod slack_api;
 pub mod slack_parsing;
 pub mod slack_realtime;
+pub mod spell_checker;
 pub mod webview_login;

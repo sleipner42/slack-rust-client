@@ -644,20 +644,20 @@ fn edit_box(ui: &mut egui::Ui, edit: &mut MessageEdit) -> Option<MessageAction> 
             });
             ui.add_space(4.0);
             let mut layouter = super::markup_editor::layouter();
-            ui.add_enabled(
-                !edit.saving,
-                egui::TextEdit::multiline(&mut edit.text)
-                    .id(id)
-                    .layouter(&mut layouter)
-                    .desired_width(ui.available_width())
-                    .desired_rows(1)
-                    .frame(egui::Frame::NONE)
-                    .margin(egui::Margin::ZERO)
-                    .return_key(egui::KeyboardShortcut::new(
-                        egui::Modifiers::SHIFT,
-                        egui::Key::Enter,
-                    )),
-            );
+            let output = egui::TextEdit::multiline(&mut edit.text)
+                .id(id)
+                .layouter(&mut layouter)
+                .desired_width(ui.available_width())
+                .desired_rows(1)
+                .frame(egui::Frame::NONE)
+                .margin(egui::Margin::ZERO)
+                .return_key(egui::KeyboardShortcut::new(
+                    egui::Modifiers::SHIFT,
+                    egui::Key::Enter,
+                ))
+                .interactive(!edit.saving)
+                .show(ui);
+            super::markup_editor::spelling(ui, &output, id, &mut edit.text);
         });
     ui.horizontal(|ui| {
         if ui

@@ -6,5 +6,6 @@ pub mod model;
 pub mod notify;
 pub mod search;
 pub mod sidebar;
+pub mod spelling;
 pub mod unread;
 pub mod uploads;

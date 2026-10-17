@@ -46,20 +46,20 @@ pub fn composer(ui: &mut egui::Ui, target: &ComposeTarget, draft: &mut Draft, hi
                 .id_salt(("draft", target))
                 .max_height(140.0)
                 .show(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut draft.text)
-                            .id(id)
-                            .layouter(&mut layouter)
-                            .hint_text(hint.to_string())
-                            .desired_width(ui.available_width())
-                            .desired_rows(2)
-                            .frame(egui::Frame::NONE)
-                            .margin(egui::Margin::ZERO)
-                            .return_key(egui::KeyboardShortcut::new(
-                                egui::Modifiers::SHIFT,
-                                egui::Key::Enter,
-                            )),
-                    );
+                    let output = egui::TextEdit::multiline(&mut draft.text)
+                        .id(id)
+                        .layouter(&mut layouter)
+                        .hint_text(hint.to_string())
+                        .desired_width(ui.available_width())
+                        .desired_rows(2)
+                        .frame(egui::Frame::NONE)
+                        .margin(egui::Margin::ZERO)
+                        .return_key(egui::KeyboardShortcut::new(
+                            egui::Modifiers::SHIFT,
+                            egui::Key::Enter,
+                        ))
+                        .show(ui);
+                    super::markup_editor::spelling(ui, &output, id, &mut draft.text);
                 });
             draft.attachments.show(ui);
             ui.add_space(8.0);
@@ -201,6 +201,95 @@ mod tests {
         frame(vec![]);
         frame(vec![egui::Event::Text("soft".into())]);
         assert_eq!(draft.text, "• one\n• two\n*loud_soft_*");
+    }
+
+    #[test]
+    fn misspelled_words_are_underlined_and_corrected_from_the_context_menu() {
+        let checker = crate::infrastructure::spell_checker::load_now();
+        let ctx = egui::Context::default();
+        crate::ui::theme::apply(&ctx);
+        let target = ComposeTarget {
+            conversation_id: "C1".into(),
+            thread_ts: None,
+        };
+        let mut draft = Draft {
+            text: "I recieve the mail".into(),
+            ..Default::default()
+        };
+        // Shapes of a frame: squiggles drawn, and where a text sits.
+        let mut frame = |events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(500.0, 300.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    composer(ui, &target, &mut draft, "Message");
+                },
+            );
+            output.textures_delta.clear();
+            let squiggles = output
+                .shapes
+                .iter()
+                .filter(|clipped| {
+                    matches!(&clipped.shape, egui::Shape::Path(path)
+                        if path.stroke.color == egui::epaint::ColorMode::Solid(crate::ui::theme::SPELLING))
+                })
+                .count();
+            let texts: Vec<_> = output
+                .shapes
+                .into_iter()
+                .filter_map(|clipped| match clipped.shape {
+                    egui::Shape::Text(text) => Some(text),
+                    _ => None,
+                })
+                .collect();
+            (squiggles, texts, draft.text.clone())
+        };
+        frame(vec![]);
+        let (squiggles, texts, _) = frame(vec![]);
+        assert_eq!(squiggles, 1, "only recieve is misspelled");
+        let editor = texts
+            .iter()
+            .find(|text| text.galley.text() == "I recieve the mail")
+            .unwrap();
+        let word = editor.pos
+            + editor
+                .galley
+                .pos_from_cursor(egui::text::CCursor::new(4))
+                .center()
+                .to_vec2();
+        let button = |pos, button, pressed| egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![egui::Event::PointerMoved(word)]);
+        frame(vec![button(word, egui::PointerButton::Secondary, true)]);
+        frame(vec![button(word, egui::PointerButton::Secondary, false)]);
+        let (_, texts, _) = frame(vec![]);
+        let suggestion = texts
+            .iter()
+            .find(|text| text.galley.text() == "receive")
+            .expect("the menu suggests receive")
+            .visual_bounding_rect()
+            .center();
+        frame(vec![egui::Event::PointerMoved(suggestion)]);
+        frame(vec![button(suggestion, egui::PointerButton::Primary, true)]);
+        frame(vec![button(
+            suggestion,
+            egui::PointerButton::Primary,
+            false,
+        )]);
+        let (squiggles, _, text) = frame(vec![]);
+        assert_eq!(text, "I receive the mail");
+        assert_eq!(squiggles, 0);
+        assert!(checker.check("receive"));
     }
 
     #[test]

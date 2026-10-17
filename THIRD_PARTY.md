@@ -10,3 +10,11 @@ Message emphasis uses unmodified Ubuntu Medium by Canonical Ltd., obtained from
 [Google Fonts](https://github.com/google/fonts/tree/main/ufl/ubuntu), under the
 [Ubuntu Font Licence 1.0](assets/fonts/UFL.txt). The license is also included in
 the macOS app bundle under Resources/Licenses.
+
+Spell checking uses unmodified Hunspell dictionaries embedded in the binary:
+English (`en_US`) from [SCOWL](https://wordlist.aspell.net) under the terms in
+[assets/dictionaries/en_US-README.txt](assets/dictionaries/en_US-README.txt),
+and Swedish (`sv_SE`, DSSO 2.40) by Göran Andersson under the
+[GNU LGPL 3.0](https://www.gnu.org/licenses/lgpl-3.0.html), see
+[assets/dictionaries/sv_SE-README.txt](assets/dictionaries/sv_SE-README.txt).
+Both notices are also included in the macOS app bundle under Resources/Licenses.

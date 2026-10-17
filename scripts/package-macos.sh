@@ -38,6 +38,8 @@ representations = {
 licenses = app / 'Contents/Resources/Licenses'
 licenses.mkdir(exist_ok=True)
 (licenses / 'Ubuntu-UFL.txt').write_text(Path('assets/fonts/UFL.txt').read_text())
+(licenses / 'en_US-dictionary-README.txt').write_text(Path('assets/dictionaries/en_US-README.txt').read_text())
+(licenses / 'sv_SE-dictionary-README.txt').write_text(Path('assets/dictionaries/sv_SE-README.txt').read_text())
 chunks = []
 for kind, size in representations.items():
     data = Path(f'target/AppIcon.iconset/icon_{size}.png').read_bytes()

@@ -118,6 +118,7 @@ pub const MENTION_BACKGROUND: Color32 = Color32::from_rgb(31, 59, 79);
 pub const SELF_MENTION_BACKGROUND: Color32 = Color32::from_rgb(84, 70, 25);
 pub const SELF_MENTION_TEXT: Color32 = Color32::from_rgb(242, 199, 68);
 pub const UNREAD_DOT: Color32 = Color32::from_rgb(235, 91, 100);
+pub const SPELLING: Color32 = Color32::from_rgb(235, 91, 100);
 pub const BADGE: Color32 = Color32::from_rgb(87, 105, 112);
 pub const QUOTE_BAR: Color32 = Color32::from_rgb(90, 93, 98);
 pub const REACTION_MINE: Color32 = Color32::from_rgb(25, 55, 80);
