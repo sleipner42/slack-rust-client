@@ -69,6 +69,11 @@ pub fn composer(
                         ))
                         .show(ui);
                     super::markup_editor::spelling(ui, &output, id, &mut draft.text);
+                    // Scroll the draft at its edges, or with the wheel, while selecting.
+                    super::rich_text::scroll_text_selection(
+                        ui,
+                        output.response.dragged_by(egui::PointerButton::Primary),
+                    );
                     if let Some(completion) = &mut completion {
                         super::emoji_completion::popup(
                             ui,
@@ -378,6 +383,92 @@ mod tests {
             frame(vec![enter(true), enter(false)]).2,
             "the next Enter sends"
         );
+    }
+
+    #[test]
+    fn dragging_a_selection_past_the_draft_or_turning_the_wheel_scrolls_it() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::apply(&ctx);
+        let target = ComposeTarget {
+            conversation_id: "C1".into(),
+            thread_ts: None,
+        };
+        let mut draft = Draft {
+            text: (0..30)
+                .map(|line| format!("line {line:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            ..Default::default()
+        };
+        let mut time = 0.0;
+        // Where the draft's text sits; it moves up as the box scrolls down.
+        let mut frame = |events: Vec<egui::Event>| {
+            time += 1.0 / 60.0;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    events,
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(500.0, 400.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    composer(ui, &target, &mut draft, "Message", None);
+                },
+            );
+            output.textures_delta.clear();
+            output
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) if text.galley.text().starts_with("line 00") => {
+                        Some(text.pos)
+                    }
+                    _ => None,
+                })
+                .expect("the draft is drawn")
+        };
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![]);
+        let top = frame(vec![]);
+        let start = top + egui::vec2(10.0, 8.0);
+        frame(vec![egui::Event::PointerMoved(start), button(start, true)]);
+        let below = egui::pos2(start.x, 380.0);
+        frame(vec![egui::Event::PointerMoved(below)]);
+        for _ in 0..60 {
+            frame(vec![]);
+        }
+        let dragged = frame(vec![]);
+        assert!(
+            dragged.y < top.y - 100.0,
+            "dragging below the draft scrolls it: {top:?} -> {dragged:?}"
+        );
+
+        let middle = egui::pos2(start.x, top.y + 40.0);
+        frame(vec![egui::Event::PointerMoved(middle)]);
+        let held = frame(vec![]);
+        frame(vec![egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 120.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        for _ in 0..30 {
+            frame(vec![]);
+        }
+        let wheeled = frame(vec![]);
+        assert!(
+            wheeled.y > held.y + 60.0,
+            "the wheel scrolls back up while selecting: {held:?} -> {wheeled:?}"
+        );
+        frame(vec![button(middle, false)]);
     }
 
     #[test]

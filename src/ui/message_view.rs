@@ -342,8 +342,10 @@ fn message_row(
                                 emoji: context.emoji,
                                 images: context.images,
                             };
-                            if let Some(edit_action) = edit_box(ui, edit, completion) {
-                                action = Some(edit_action);
+                            let (edit_action, edit_selecting) = edit_box(ui, edit, completion);
+                            selecting |= edit_selecting;
+                            if edit_action.is_some() {
+                                action = edit_action;
                             }
                         }
                         None => {
@@ -613,7 +615,7 @@ fn edit_box(
     ui: &mut egui::Ui,
     edit: &mut MessageEdit,
     mut completion: super::emoji_completion::EmojiCompletion<'_>,
-) -> Option<MessageAction> {
+) -> (Option<MessageAction>, bool) {
     let id = egui::Id::new(("message_edit", &edit.ts));
     super::markup_editor::restore_focus(ui, id);
     let mut action = None;
@@ -642,7 +644,7 @@ fn edit_box(
         state.store(ui.ctx(), id);
         ui.memory_mut(|memory| memory.request_focus(id));
     }
-    egui::Frame::new()
+    let selecting = egui::Frame::new()
         .fill(theme::INPUT_BACKGROUND)
         .stroke(egui::Stroke::new(1.0, theme::BORDER))
         .corner_radius(2)
@@ -668,7 +670,10 @@ fn edit_box(
                 .show(ui);
             super::markup_editor::spelling(ui, &output, id, &mut edit.text);
             super::emoji_completion::popup(ui, &output, id, &mut edit.text, &mut completion);
-        });
+            // The timeline scrolls at its edges while a selection is dragged here.
+            output.response.dragged_by(egui::PointerButton::Primary)
+        })
+        .inner;
     ui.horizontal(|ui| {
         if ui
             .add_enabled(!edit.saving, egui::Button::new("Cancel"))
@@ -690,7 +695,7 @@ fn edit_box(
     if let Some(error) = &edit.error {
         ui.colored_label(theme::SELF_MENTION_TEXT, error);
     }
-    action
+    (action, selecting)
 }
 
 /// Author names and times select like message text, so a drag from them also
