@@ -13,6 +13,7 @@ mod message_view;
 mod outbox;
 pub mod quick_switcher;
 mod rich_text;
+mod search;
 mod share_dialog;
 mod theme;
 mod todos;

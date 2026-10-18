@@ -15,8 +15,8 @@ use crate::domain::model::{
 };
 use crate::infrastructure::slack_parsing::{
     next_cursor, order_sections, parse_attachment, parse_conversations, parse_custom_emoji,
-    parse_draft, parse_message, parse_muted, parse_read_states, parse_saved_todos, parse_section,
-    parse_user_profile,
+    parse_draft, parse_message, parse_muted, parse_read_states, parse_saved_todos, parse_search,
+    parse_section, parse_user_profile,
 };
 
 pub struct SlackHttpGateway {
@@ -759,6 +759,32 @@ impl SlackGateway for SlackHttpGateway {
             .ok_or_else(|| SlackError("Slack returned no link for this message.".into()))
     }
 
+    fn search_messages(
+        &self,
+        query: &str,
+        sort: crate::domain::message_search::SearchSort,
+        page: u32,
+    ) -> Result<crate::domain::message_search::SearchPage, SlackError> {
+        use crate::domain::message_search::SearchSort;
+        let page = page.to_string();
+        let sort = match sort {
+            SearchSort::Newest => "timestamp",
+            SearchSort::Relevant => "score",
+        };
+        let body = self.call(
+            "search.messages",
+            &[
+                ("query", query),
+                ("count", SEARCH_PAGE_SIZE),
+                ("page", &page),
+                ("highlight", "true"),
+                ("sort", sort),
+                ("sort_dir", "desc"),
+            ],
+        )?;
+        Ok(parse_search(&body))
+    }
+
     fn mark_read(&self, conversation_id: &str, ts: &str) -> Result<(), SlackError> {
         self.call(
             "conversations.mark",
@@ -891,6 +917,7 @@ fn is_slack_host(url: &str) -> bool {
 const CONVERSATION_TYPES: &str = "public_channel,private_channel,mpim,im";
 const PAGE_SIZE: &str = "1000";
 const HISTORY_LIMIT: &str = "100";
+const SEARCH_PAGE_SIZE: &str = "20";
 const REPLIES_LIMIT: &str = "200";
 const MAX_ATTEMPTS: usize = 4;
 const DEFAULT_RETRY_SECONDS: u64 = 2;

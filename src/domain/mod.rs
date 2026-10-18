@@ -2,6 +2,7 @@ pub mod activity;
 pub mod emoji_usage;
 pub mod gateway;
 pub mod markup;
+pub mod message_search;
 pub mod message_text;
 pub mod model;
 pub mod notify;

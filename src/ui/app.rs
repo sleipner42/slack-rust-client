@@ -26,6 +26,7 @@ use crate::ui::message_view::{
 };
 use crate::ui::outbox::{Outbox, SendRequest};
 use crate::ui::quick_switcher::{QuickSwitcher, SwitcherOutcome};
+use crate::ui::search::Search;
 use crate::ui::share_dialog::{ShareDialog, ShareOutcome};
 use crate::ui::theme;
 use crate::ui::todos::Todos;
@@ -92,6 +93,8 @@ struct ChatApp {
     todos: Option<Todos>,
     activity_open: bool,
     activity: Option<Activity>,
+    search_open: bool,
+    search: Search,
     drafts: HashMap<ComposeTarget, Draft>,
     draft_store: crate::infrastructure::draft_store::DraftStore,
     /// Drafts as last written to disk, to write only when something changed.
@@ -239,6 +242,7 @@ impl eframe::App for ChatApp {
         for row in fresh {
             self.notify_activity(row);
         }
+        self.search.poll();
         self.images.poll();
         self.poll();
         self.dock.update(self.workspace.as_ref());
@@ -261,6 +265,7 @@ impl eframe::App for ChatApp {
             self.unread_only = !self.unread_only;
         }
         self.history_navigation(ui.ctx());
+        self.search_shortcuts(ui.ctx());
         self.quick_switcher(ui.ctx());
         self.emoji_picker(ui.ctx());
         self.share_dialog(ui.ctx());
@@ -335,6 +340,17 @@ impl eframe::App for ChatApp {
                         {
                             self.open_activity_item(row);
                         }
+                    } else if self.search_open && !inline_thread {
+                        if let Some(result) = self.search.show(ui, &mut self.images) {
+                            self.open_message(
+                                result.conversation_id.clone(),
+                                result
+                                    .thread_ts
+                                    .clone()
+                                    .unwrap_or(result.message.ts.clone()),
+                                Some(result.message),
+                            );
+                        }
                     } else if inline_thread {
                         self.thread_panel(ui);
                     } else {
@@ -389,6 +405,7 @@ impl ChatApp {
             }
         });
         let settings = crate::infrastructure::ui_settings::UiSettings::load();
+        let search = Search::new(Arc::clone(&service), ctx.clone(), settings.search_sort);
         let mut app = Self {
             service,
             ctx,
@@ -409,6 +426,8 @@ impl ChatApp {
             todos: None,
             activity_open: false,
             activity: None,
+            search_open: false,
+            search,
             drafts: HashMap::new(),
             draft_store: crate::infrastructure::draft_store::DraftStore::new(
                 crate::infrastructure::draft_store::DraftStore::default_path(),
@@ -477,6 +496,22 @@ impl ChatApp {
         {
             self.switcher = Some(QuickSwitcher::new());
         }
+        if ui
+            .add_sized(
+                [ui.available_width(), 30.0],
+                egui::Button::selectable(
+                    self.search_open,
+                    (
+                        "Search",
+                        egui::Atom::grow(),
+                        egui::RichText::new(SEARCH_SHORTCUT).weak(),
+                    ),
+                ),
+            )
+            .clicked()
+        {
+            self.open_search(None);
+        }
         let Some(workspace) = &self.workspace else {
             if self.workspace_loading {
                 ui.weak("Loading conversations…");
@@ -508,6 +543,7 @@ impl ChatApp {
         {
             self.todos_open = true;
             self.activity_open = false;
+            self.search_open = false;
             self.thread = None;
             self.composer_focus = None;
             if let Some(todos) = &mut self.todos {
@@ -534,6 +570,7 @@ impl ChatApp {
             }
             self.activity_open = true;
             self.todos_open = false;
+            self.search_open = false;
             self.composer_focus = None;
             if let Some(activity) = &mut self.activity {
                 activity.open();
@@ -593,7 +630,7 @@ impl ChatApp {
         let selected = self
             .selected
             .as_ref()
-            .filter(|_| !self.todos_open && !self.activity_open)
+            .filter(|_| self.conversation_shown())
             .map(|conversation| conversation.id.as_str());
         let mut clicked = None;
         // Conversations with an unsent message, marked with a pencil as in Slack.
@@ -932,15 +969,25 @@ impl ChatApp {
             .thread_ts
             .clone()
             .unwrap_or_else(|| row.item.ts.clone());
+        self.open_message(row.item.conversation_id, root, row.message);
+    }
+
+    /// Show a message, with its thread, in the side panel.
+    fn open_message(
+        &mut self,
+        conversation_id: String,
+        root: String,
+        message: Option<DisplayMessage>,
+    ) {
         let target = ComposeTarget {
-            conversation_id: row.item.conversation_id,
+            conversation_id,
             thread_ts: Some(root),
         };
         let messages = self
             .history_cache
             .get(&target)
             .map(|(_, messages)| messages.clone())
-            .unwrap_or_else(|| row.message.into_iter().collect());
+            .unwrap_or_else(|| message.into_iter().collect());
         self.thread = Some(ThreadView {
             target: target.clone(),
             messages,
@@ -956,7 +1003,7 @@ impl ChatApp {
             .frame(theme::header_frame())
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.heading(if self.activity_open {
+                    ui.heading(if self.activity_open || self.search_open {
                         "Message"
                     } else {
                         "Thread"
@@ -991,6 +1038,9 @@ impl ChatApp {
                 && let Some(activity) = &mut self.activity
             {
                 activity.selected = None;
+            }
+            if self.search_open {
+                self.search.selected = None;
             }
             return;
         }
@@ -1028,6 +1078,12 @@ impl ChatApp {
                     {
                         ui.colored_label(theme::SELF_MENTION_TEXT, error);
                     }
+                }
+                if self.search_open
+                    && let Some(selection) = &self.search.selected
+                {
+                    ui.label(egui::RichText::new(&selection.source).small().weak());
+                    ui.add_space(8.0);
                 }
                 if let Some(error) = &thread.error {
                     ui.colored_label(theme::SELF_MENTION_TEXT, error);
@@ -1237,10 +1293,11 @@ impl ChatApp {
 
     fn show_conversation(&mut self, conversation: Conversation) {
         self.todos_open = false;
-        if self.activity_open {
+        if self.activity_open || self.search_open {
             self.thread = None;
         }
         self.activity_open = false;
+        self.search_open = false;
         self.composer_focus = None;
         if self.is_selected(&conversation.id) {
             return;
@@ -1543,6 +1600,7 @@ impl ChatApp {
                 .activity
                 .as_ref()
                 .map_or(self.settings.activity, Activity::query),
+            search_sort: self.search.sort(),
         };
         if current != self.settings {
             current.save();
@@ -2086,7 +2144,7 @@ impl ChatApp {
             if let Some(conversation_id) = self
                 .selected
                 .as_ref()
-                .filter(|_| !self.todos_open && !self.activity_open)
+                .filter(|_| self.conversation_shown())
                 .map(|conversation| conversation.id.clone())
             {
                 // Periodic polls do not invalidate a still-running request.
@@ -2240,10 +2298,8 @@ impl ChatApp {
             thread.target.conversation_id == conversation_id
                 && thread.target.thread_ts.as_deref() == Some(root.map_or(ts, String::as_str))
         });
-        let timeline_open = root.is_none()
-            && self.is_selected(conversation_id)
-            && !self.activity_open
-            && !self.todos_open;
+        let timeline_open =
+            root.is_none() && self.is_selected(conversation_id) && self.conversation_shown();
         !(self.ctx.input(|input| input.focused) && (thread_open || timeline_open))
             && self.notified.insert(format!("{conversation_id}:{ts}"))
     }
@@ -2288,6 +2344,47 @@ impl ChatApp {
                 self.thread = None;
                 self.composer_focus = Some(target_of(conversation_id));
             }
+        }
+    }
+
+    #[cfg(test)]
+    fn search_results(&self) -> &[crate::application::message_search::SearchResult] {
+        self.search.results()
+    }
+
+    /// Whether the selected conversation's timeline is on screen.
+    fn conversation_shown(&self) -> bool {
+        !self.todos_open && !self.activity_open && !self.search_open
+    }
+
+    fn open_search(&mut self, query: Option<String>) {
+        if !self.search_open {
+            self.thread = None;
+        }
+        self.search_open = true;
+        self.activity_open = false;
+        self.todos_open = false;
+        self.composer_focus = None;
+        self.search.focus(query);
+    }
+
+    /// Search everywhere, or within the open channel as Slack does.
+    fn search_shortcuts(&mut self, ctx: &egui::Context) {
+        let (everywhere, here) = ctx.input_mut(|input| {
+            (
+                input.consume_key(egui::Modifiers::COMMAND, egui::Key::G),
+                input.consume_key(egui::Modifiers::COMMAND, egui::Key::F),
+            )
+        });
+        if here {
+            let channel = self
+                .selected
+                .as_ref()
+                .filter(|conversation| self.conversation_shown() && !conversation.is_direct())
+                .map(|conversation| format!("in:#{} ", conversation.name));
+            self.open_search(channel);
+        } else if everywhere {
+            self.open_search(None);
         }
     }
 
@@ -2364,6 +2461,10 @@ const FORWARD_LABEL: &str = "Alt+Right";
 const SWITCHER_SHORTCUT: &str = "⌘P";
 #[cfg(not(target_os = "macos"))]
 const SWITCHER_SHORTCUT: &str = "Ctrl+P";
+#[cfg(target_os = "macos")]
+const SEARCH_SHORTCUT: &str = "⌘G";
+#[cfg(not(target_os = "macos"))]
+const SEARCH_SHORTCUT: &str = "Ctrl+G";
 #[cfg(target_os = "macos")]
 const UNREAD_SHORTCUT: &str = "⌘⇧U";
 #[cfg(not(target_os = "macos"))]
@@ -2819,6 +2920,70 @@ mod tests {
             assert!(ctx.memory(|memory| memory.has_focus(target("C1").editor_id())));
         }
         assert_eq!(app.drafts[&target("C1")].text, "existing draft!!");
+    }
+
+    #[test]
+    fn search_within_a_channel_finds_messages_and_opens_them_with_their_thread() {
+        let mut app = app();
+        let ctx = app.ctx.clone();
+        app.show_conversation(conversation(&app, "C1"));
+        let frame = |app: &mut ChatApp, events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    app.search_shortcuts(ui.ctx());
+                    if app.search_open {
+                        app.search.show(ui, &mut app.images);
+                    }
+                },
+            );
+            output.textures_delta.clear();
+        };
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        frame(&mut app, vec![key(egui::Key::F, egui::Modifiers::COMMAND)]);
+        assert!(app.search_open && !app.conversation_shown());
+        assert_eq!(app.search.query, "in:#general ");
+        frame(&mut app, vec![]);
+        frame(
+            &mut app,
+            vec![
+                egui::Event::Text("drafts".into()),
+                key(egui::Key::Enter, egui::Modifiers::NONE),
+            ],
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.search.selected.is_none() && Instant::now() < deadline {
+            app.search.poll();
+            if let Some(result) = app.search_results().first() {
+                app.search.selected = Some(result.clone());
+            }
+        }
+        let result = app.search.selected.clone().expect("a result");
+        assert!(result.message.text.contains("drafts stay"));
+        app.open_message(
+            result.conversation_id.clone(),
+            result.thread_ts.clone().unwrap(),
+            Some(result.message.clone()),
+        );
+        let thread = app.thread.as_ref().unwrap();
+        assert_eq!(thread.target.conversation_id, "C1");
+        assert_eq!(thread.target.thread_ts, result.thread_ts);
+        // Going back to a conversation leaves search and its side panel.
+        app.show_conversation(conversation(&app, "C2"));
+        assert!(!app.search_open && app.thread.is_none());
     }
 
     fn conversation(app: &ChatApp, id: &str) -> Conversation {

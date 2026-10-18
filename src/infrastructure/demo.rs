@@ -324,6 +324,62 @@ impl SlackGateway for DemoGateway {
             .cloned()
             .collect())
     }
+    /// Messages containing every plain word of the query; `from:` and the
+    /// other modifiers are ignored.
+    fn search_messages(
+        &self,
+        query: &str,
+        _sort: crate::domain::message_search::SearchSort,
+        page: u32,
+    ) -> Result<crate::domain::message_search::SearchPage, SlackError> {
+        use crate::domain::message_search::{
+            HIGHLIGHT_END, HIGHLIGHT_START, SearchMatch, SearchPage,
+        };
+        let words: Vec<String> = query
+            .split_whitespace()
+            .filter(|word| !word.contains(':'))
+            .map(str::to_lowercase)
+            .collect();
+        let names = self.list_conversations()?;
+        let mut matches: Vec<SearchMatch> = Vec::new();
+        for (conversation_id, messages) in self.messages.lock().unwrap().iter() {
+            for message in messages {
+                let lower = message.text.to_lowercase();
+                if words.is_empty() || !words.iter().all(|word| lower.contains(word.as_str())) {
+                    continue;
+                }
+                let mut highlighted = message.text.clone();
+                for word in &words {
+                    if let Some(start) = highlighted.to_lowercase().find(word.as_str()) {
+                        let end = start + word.len();
+                        highlighted = format!(
+                            "{}{HIGHLIGHT_START}{}{HIGHLIGHT_END}{}",
+                            &highlighted[..start],
+                            &highlighted[start..end],
+                            &highlighted[end..]
+                        );
+                    }
+                }
+                let conversation = names.iter().find(|c| c.id == *conversation_id);
+                matches.push(SearchMatch {
+                    conversation_id: conversation_id.clone(),
+                    conversation_name: conversation.map_or_else(String::new, |c| c.name.clone()),
+                    is_channel: conversation.is_some_and(|c| !c.is_direct()),
+                    thread_ts: message.thread_ts.clone(),
+                    message: message.clone(),
+                    highlighted,
+                });
+            }
+        }
+        matches.sort_by(|a, b| b.message.ts.cmp(&a.message.ts));
+        let total = matches.len() as u32;
+        Ok(SearchPage {
+            matches: if page <= 1 { matches } else { Vec::new() },
+            page: page.max(1),
+            pages: total.min(1),
+            total,
+        })
+    }
     fn user_profile(&self, user_id: &str) -> Result<UserProfile, SlackError> {
         let name = match user_id {
             "U1" => "Alex Morgan",

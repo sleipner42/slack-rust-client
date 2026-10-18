@@ -89,6 +89,44 @@ pub fn parse_message(item: &Value) -> Option<Message> {
     })
 }
 
+pub fn parse_search(body: &Value) -> crate::domain::message_search::SearchPage {
+    let messages = &body["messages"];
+    let paging = &messages["paging"];
+    let number = |value: &Value| value.as_u64().unwrap_or(0) as u32;
+    crate::domain::message_search::SearchPage {
+        matches: messages["matches"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(parse_search_match)
+            .collect(),
+        page: number(&paging["page"]).max(1),
+        pages: number(&paging["pages"]),
+        total: number(&paging["total"]),
+    }
+}
+
+fn parse_search_match(item: &Value) -> Option<crate::domain::message_search::SearchMatch> {
+    use crate::domain::message_search::{SearchMatch, permalink_thread, strip_highlights};
+    let channel = &item["channel"];
+    let highlighted = item["text"].as_str().unwrap_or_default().to_owned();
+    // The message itself without the match markers.
+    let mut clean = item.clone();
+    clean["text"] = Value::String(strip_highlights(&highlighted));
+    let thread_ts = item["permalink"].as_str().and_then(permalink_thread);
+    let mut message = parse_message(&clean)?;
+    message.thread_ts = message.thread_ts.or(thread_ts.clone());
+    Some(SearchMatch {
+        conversation_id: channel["id"].as_str()?.to_owned(),
+        conversation_name: channel["name"].as_str().unwrap_or_default().to_owned(),
+        is_channel: !(channel["is_im"].as_bool().unwrap_or(false)
+            || channel["is_mpim"].as_bool().unwrap_or(false)),
+        thread_ts,
+        message,
+        highlighted,
+    })
+}
+
 fn parse_share(attachment: &Value) -> SharedMessage {
     let name = ["author_name", "author_subname"]
         .iter()
@@ -833,5 +871,42 @@ mod todo_tests {
         assert_eq!(parse_saved_todos(&body, true).unwrap().items.len(), 1);
         assert!(parse_saved_todos(&body, false).unwrap().items.is_empty());
         assert!(parse_saved_todos(&json!({"ok":true}), false).is_err());
+    }
+
+    #[test]
+    fn search_matches_keep_their_highlights_thread_and_conversation() {
+        let body = json!({"ok": true, "messages": {
+            "matches": [
+                {
+                    "type": "message", "ts": "1700000000.000200", "user": "U1",
+                    "text": "the \u{e000}deploy\u{e001} is done",
+                    "permalink": "https://x.slack.com/archives/C1/p1700000000000200?thread_ts=1700000000.000100&cid=C1",
+                    "channel": {"id": "C1", "name": "ops", "is_channel": true, "is_im": false, "is_mpim": false}
+                },
+                {
+                    "type": "message", "ts": "1700000001.000000", "user": "U2",
+                    "text": "\u{e000}deploy\u{e001}?",
+                    "permalink": "https://x.slack.com/archives/D1/p1700000001000000",
+                    "channel": {"id": "D1", "name": "U2", "is_channel": false, "is_im": true}
+                }
+            ],
+            "paging": {"count": 20, "page": 2, "pages": 9, "total": 170}
+        }});
+        let page = parse_search(&body);
+        assert_eq!((page.page, page.pages, page.total), (2, 9, 170));
+        let [reply, direct] = &page.matches[..] else {
+            panic!("two matches expected");
+        };
+        assert_eq!(reply.message.text, "the deploy is done");
+        assert_eq!(reply.highlighted, "the \u{e000}deploy\u{e001} is done");
+        assert_eq!(reply.thread_ts.as_deref(), Some("1700000000.000100"));
+        assert_eq!(
+            reply.message.thread_ts.as_deref(),
+            Some("1700000000.000100")
+        );
+        assert!(reply.is_channel);
+        assert_eq!(reply.conversation_name, "ops");
+        assert_eq!(direct.thread_ts, None);
+        assert!(!direct.is_channel);
     }
 }

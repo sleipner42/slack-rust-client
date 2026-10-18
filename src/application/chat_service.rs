@@ -205,6 +205,66 @@ impl ChatService {
         Ok(rows)
     }
 
+    pub fn search(
+        &self,
+        query: &str,
+        sort: crate::domain::message_search::SearchSort,
+        page: u32,
+    ) -> Result<super::message_search::SearchResults, SlackError> {
+        use super::message_search::{SearchResult, SearchResults};
+        use crate::domain::message_search::{HIGHLIGHT_START, snippet};
+        let found = self.gateway.search_messages(query, sort, page)?;
+        let raw: Vec<Message> = found
+            .matches
+            .iter()
+            .map(|found| found.message.clone())
+            .collect();
+        let mut ids = referenced_users(&raw);
+        // Direct messages are named after the other person's user ID.
+        ids.extend(
+            found
+                .matches
+                .iter()
+                .filter(|found| !found.is_channel && found.conversation_name.starts_with('U'))
+                .map(|found| found.conversation_name.clone()),
+        );
+        self.prefetch_profiles(&ids);
+        let messages = self.display_cached_all(&raw);
+        let results = found
+            .matches
+            .into_iter()
+            .zip(messages)
+            .map(|(found, message)| {
+                let known = lock(&self.conversation_names)
+                    .get(&found.conversation_id)
+                    .cloned();
+                let source = if found.is_channel {
+                    format!("#{}", known.unwrap_or(found.conversation_name))
+                } else {
+                    known.unwrap_or_else(|| CachedNames(self).user_name(&found.conversation_name))
+                };
+                let mut line = snippet(&plain_markup(&found.highlighted, &CachedNames(self)));
+                if !line.contains(HIGHLIGHT_START) && line.trim().is_empty() {
+                    let (title, rest) = super::todos::preview_lines(&message);
+                    line = format!("{title} {rest}").trim().to_owned();
+                }
+                SearchResult {
+                    conversation_id: found.conversation_id,
+                    thread_ts: found.thread_ts,
+                    source,
+                    snippet: line,
+                    message,
+                }
+            })
+            .collect();
+        Ok(SearchResults {
+            results,
+            page: found.page,
+            pages: found.pages,
+            total: found.total,
+        })
+    }
+
     pub fn complete_todo(&self, item: &crate::domain::model::SavedTodo) -> Result<(), SlackError> {
         self.gateway.complete_todo(item)
     }
@@ -925,6 +985,29 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn search_results_name_their_conversation_and_keep_the_match_in_view() {
+        let service = ChatService::new(Arc::new(DemoGateway::new()));
+        service.load_workspace().unwrap();
+        let found = service
+            .search(
+                "drafts",
+                crate::domain::message_search::SearchSort::Newest,
+                1,
+            )
+            .unwrap();
+        assert_eq!(found.total, 1);
+        let result = &found.results[0];
+        assert_eq!(result.source, "#general");
+        assert!(result.is_reply());
+        assert_eq!(result.message.author, "You");
+        assert!(
+            result.snippet.contains("And \u{e000}drafts\u{e001} stay"),
+            "{}",
+            result.snippet
+        );
     }
 
     #[test]

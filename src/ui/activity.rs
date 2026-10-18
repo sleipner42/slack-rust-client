@@ -506,30 +506,7 @@ fn activity_row(
         )));
         content.set_clip_rect(rect.intersect(ui.clip_rect()));
         content.horizontal_top(|ui| {
-            if let Some(image) = row.avatar_url.as_deref().and_then(|url| images.image(url)) {
-                ui.add(
-                    image
-                        .fit_to_exact_size(egui::vec2(28.0, 28.0))
-                        .corner_radius(4),
-                );
-            } else {
-                let (r, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
-                ui.painter().rect_filled(r, 4.0, theme::ACCENT);
-                let initial = row
-                    .actor
-                    .chars()
-                    .next()
-                    .unwrap_or('·')
-                    .to_uppercase()
-                    .to_string();
-                ui.painter().text(
-                    r.center(),
-                    egui::Align2::CENTER_CENTER,
-                    initial,
-                    egui::FontId::proportional(13.0),
-                    theme::TEXT,
-                );
-            }
+            avatar(ui, row.avatar_url.as_deref(), &row.actor, images);
             ui.add_space(4.0);
             ui.vertical(|ui| {
                 ui.set_max_width(ui.available_width());
@@ -602,7 +579,34 @@ fn activity_row(
         .clicked()
 }
 
-fn skeleton(ui: &mut egui::Ui) {
+/// A small avatar, or the name's initial while it loads.
+pub(super) fn avatar(ui: &mut egui::Ui, url: Option<&str>, name: &str, images: &mut ImageCache) {
+    if let Some(image) = url.and_then(|url| images.image(url)) {
+        ui.add(
+            image
+                .fit_to_exact_size(egui::vec2(28.0, 28.0))
+                .corner_radius(4),
+        );
+    } else {
+        let (r, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
+        ui.painter().rect_filled(r, 4.0, theme::ACCENT);
+        let initial = name
+            .chars()
+            .next()
+            .unwrap_or('·')
+            .to_uppercase()
+            .to_string();
+        ui.painter().text(
+            r.center(),
+            egui::Align2::CENTER_CENTER,
+            initial,
+            egui::FontId::proportional(13.0),
+            theme::TEXT,
+        );
+    }
+}
+
+pub(super) fn skeleton(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), ROW_HEIGHT),
         egui::Sense::hover(),

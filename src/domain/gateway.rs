@@ -122,6 +122,17 @@ pub trait SlackGateway: Send + Sync {
     fn delete_draft(&self, _id: &str) -> Result<(), SlackError> {
         Ok(())
     }
+    /// One page of messages matching a Slack search query.
+    fn search_messages(
+        &self,
+        _query: &str,
+        _sort: super::message_search::SearchSort,
+        _page: u32,
+    ) -> Result<super::message_search::SearchPage, SlackError> {
+        Err(SlackError(
+            "Searching messages is unavailable for this workspace.".into(),
+        ))
+    }
     /// A link to the message that Slack unfurls as a shared message.
     fn permalink(&self, _conversation_id: &str, _ts: &str) -> Result<String, SlackError> {
         Err(SlackError(

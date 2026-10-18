@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::activity::ActivityQuery;
+use crate::domain::message_search::SearchSort;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -12,6 +13,7 @@ pub struct UiSettings {
     /// The sidebar lists only conversations that need attention.
     pub unread_only: bool,
     pub activity: ActivityQuery,
+    pub search_sort: SearchSort,
 }
 
 impl UiSettings {
@@ -62,11 +64,13 @@ mod tests {
                 filter: ActivityFilter::Mentions,
                 unread_only: true,
             },
+            search_sort: SearchSort::Relevant,
         };
         let json = serde_json::to_string(&settings).unwrap();
         assert_eq!(serde_json::from_str::<UiSettings>(&json).unwrap(), settings);
         let old: UiSettings = serde_json::from_str(r#"{"unread_only": true}"#).unwrap();
         assert!(old.unread_only);
         assert_eq!(old.activity, ActivityQuery::default());
+        assert_eq!(old.search_sort, SearchSort::Newest);
     }
 }
