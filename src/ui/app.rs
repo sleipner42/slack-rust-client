@@ -86,6 +86,8 @@ struct ChatApp {
     messages: Vec<DisplayMessage>,
     history_cache: HashMap<ComposeTarget, (Instant, Vec<DisplayMessage>)>,
     unread_only: bool,
+    /// View choices as last saved.
+    settings: crate::infrastructure::ui_settings::UiSettings,
     todos_open: bool,
     todos: Option<Todos>,
     activity_open: bool,
@@ -225,6 +227,7 @@ impl eframe::App for ChatApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
         self.save_drafts();
+        self.save_settings();
         if let Some(todos) = &mut self.todos {
             todos.poll();
         }
@@ -385,6 +388,7 @@ impl ChatApp {
                 send_ctx.request_repaint();
             }
         });
+        let settings = crate::infrastructure::ui_settings::UiSettings::load();
         let mut app = Self {
             service,
             ctx,
@@ -399,7 +403,8 @@ impl ChatApp {
             forward: Vec::new(),
             messages: Vec::new(),
             history_cache: HashMap::new(),
-            unread_only: false,
+            unread_only: settings.unread_only,
+            settings,
             todos_open: false,
             todos: None,
             activity_open: false,
@@ -483,29 +488,7 @@ impl ChatApp {
             .iter()
             .filter(|conversation| needs_attention(workspace, &conversation.id))
             .count();
-        if ui
-            .add_sized(
-                [ui.available_width(), 30.0],
-                egui::Button::selectable(
-                    self.unread_only,
-                    (
-                        egui::RichText::new("Unreads")
-                            .strong()
-                            .color(if unread_count > 0 {
-                                theme::TEXT_STRONG
-                            } else {
-                                theme::TEXT_MUTED
-                            }),
-                        egui::Atom::grow(),
-                        egui::RichText::new(unread_count.to_string()).color(theme::LINK),
-                    ),
-                ),
-            )
-            .on_hover_text(format!("Show unread conversations · {UNREAD_SHORTCUT}"))
-            .clicked()
-        {
-            self.unread_only = !self.unread_only;
-        }
+
         if ui
             .add_sized(
                 [ui.available_width(), 30.0],
@@ -557,8 +540,56 @@ impl ChatApp {
             }
         }
         ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(8.0);
+        // The unread filter is a view setting, so it sits on the divider above
+        // the conversations rather than among the navigation entries.
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 22.0),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                let filter_id = ui.make_persistent_id("unread_filter_icon");
+                let icon = egui::Atom::custom(filter_id, egui::vec2(12.0, 12.0));
+                let button = if unread_count > 0 {
+                    egui::Button::selectable(
+                        self.unread_only,
+                        (
+                            icon,
+                            egui::RichText::new(unread_count.to_string())
+                                .small()
+                                .color(theme::LINK),
+                        ),
+                    )
+                } else {
+                    egui::Button::selectable(self.unread_only, icon)
+                };
+                let output = button.gap(4.0).atom_ui(ui);
+                if let Some(rect) = output.rect(filter_id) {
+                    let color = if self.unread_only {
+                        theme::TEXT_STRONG
+                    } else {
+                        theme::TEXT_MUTED
+                    };
+                    paint_filter(ui, rect, color);
+                }
+                let tooltip = if self.unread_only {
+                    format!("Showing unread conversations · {UNREAD_SHORTCUT} shows all")
+                } else {
+                    format!("Show only unread conversations · {UNREAD_SHORTCUT}")
+                };
+                if output.response.on_hover_text(tooltip).clicked() {
+                    self.unread_only = !self.unread_only;
+                }
+                let (line, _) = ui.allocate_exact_size(
+                    egui::vec2((ui.available_width() - 6.0).max(0.0), 1.0),
+                    egui::Sense::hover(),
+                );
+                ui.painter().hline(
+                    line.x_range(),
+                    line.center().y,
+                    ui.visuals().widgets.noninteractive.bg_stroke,
+                );
+            },
+        );
+        ui.add_space(6.0);
         let selected = self
             .selected
             .as_ref()
@@ -1505,6 +1536,20 @@ impl ChatApp {
         self.refresh_conversation(&list.conversation_id);
     }
 
+    fn save_settings(&mut self) {
+        let current = crate::infrastructure::ui_settings::UiSettings {
+            unread_only: self.unread_only,
+            activity: self
+                .activity
+                .as_ref()
+                .map_or(self.settings.activity, Activity::query),
+        };
+        if current != self.settings {
+            current.save();
+            self.settings = current;
+        }
+    }
+
     /// Remember emoji the user picked, for the frequently used list.
     fn record_emoji(&mut self, names: impl IntoIterator<Item = String>) {
         let now = chrono::Utc::now().timestamp_millis();
@@ -1655,6 +1700,7 @@ impl ChatApp {
                                 self.activity = Some(Activity::new(
                                     Arc::clone(&self.service),
                                     self.ctx.clone(),
+                                    self.settings.activity,
                                 ));
                             }
                             self.workspace = Some(workspace);
@@ -2444,6 +2490,31 @@ fn sidebar_row(
     .inner
 }
 
+/// A funnel, for the unread filter.
+fn paint_filter(ui: &egui::Ui, rect: egui::Rect, color: egui::Color32) {
+    let (left, right, top) = (rect.left() + 0.5, rect.right() - 0.5, rect.top() + 1.5);
+    let neck = rect.center().y + 1.0;
+    let center = rect.center().x;
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(left, top),
+            egui::pos2(right, top),
+            egui::pos2(center + 1.6, neck),
+            egui::pos2(center - 1.6, neck),
+        ],
+        color,
+        egui::Stroke::NONE,
+    ));
+    ui.painter().rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(center - 1.6, neck),
+            egui::pos2(center + 1.6, rect.bottom() - 0.5),
+        ),
+        0.0,
+        color,
+    );
+}
+
 /// A small slanted pencil, for conversations with a draft.
 fn paint_pencil(ui: &egui::Ui, rect: egui::Rect, color: egui::Color32) {
     let center = rect.center();
@@ -2964,6 +3035,28 @@ mod tests {
             app.messages, messages,
             "invalidated/other-channel previews cannot replace the view"
         );
+    }
+
+    #[test]
+    fn view_choices_are_saved_and_activity_starts_with_the_saved_filter() {
+        use crate::domain::activity::{ActivityFilter, ActivityQuery};
+        let mut app = app();
+        assert!(app.activity.is_some(), "workspace loaded");
+        app.unread_only = true;
+        app.save_settings();
+        assert!(app.settings.unread_only);
+        let saved = ActivityQuery {
+            filter: ActivityFilter::Mentions,
+            unread_only: true,
+        };
+        app.activity = Some(Activity::new(
+            Arc::clone(&app.service),
+            app.ctx.clone(),
+            saved,
+        ));
+        app.save_settings();
+        assert_eq!(app.settings.activity, saved);
+        assert_eq!(app.activity.as_ref().unwrap().query(), saved);
     }
 
     #[test]

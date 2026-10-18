@@ -58,10 +58,10 @@ pub struct Activity {
 }
 
 impl Activity {
-    pub fn new(service: Arc<ChatService>, ctx: egui::Context) -> Self {
+    pub fn new(service: Arc<ChatService>, ctx: egui::Context, query: ActivityQuery) -> Self {
         let (sender, receiver) = channel();
         let mut activity = Self {
-            query: ActivityQuery::default(),
+            query,
             feed_stale: false,
             announced: HashSet::new(),
             primed: false,
@@ -91,6 +91,11 @@ impl Activity {
         {
             self.load(String::new());
         }
+    }
+
+    /// The filter shown, remembered between runs.
+    pub fn query(&self) -> ActivityQuery {
+        self.query
     }
 
     pub fn invalidate(&mut self) {
