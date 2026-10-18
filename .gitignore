@@ -17,6 +17,15 @@ cookies*.json
 cookies*.sqlite*
 session.json
 session*.json
+drafts.json
+drafts.json.part
+settings.json
+settings.json.part
+emoji_use.json
+emoji_use.json.part
+*.har
+*.pcap
+*.pcapng
 *.pem
 *.key
 *.p12
@@ -32,6 +41,7 @@ session*.json
 /cache/
 /logs/
 /import/
+/videos/
 /local-storage-copy/
 /Cookies
 /Cookies-*

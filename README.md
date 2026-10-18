@@ -2,12 +2,15 @@
 
 A compact, unofficial Slack client for macOS and Linux, written in Rust with
 egui and wgpu. Inspired by old IRC clients: readable, restrained, and fast.
+This is an independent project, not affiliated with or endorsed by Slack.
 
 - Channels, DMs, threads, reactions, inline images, and unread indicators.
 - Activity feed with mentions, replies, reactions, and read-on-open behavior.
 - Slack to-dos with a detail panel and completion controls.
 - Cmd+P to switch conversations; Enter to send, Shift+Enter for a new line.
 - Local caching and immediate outgoing messages.
+- Message editing/sharing, English and Swedish spell checking, and emoji completion.
+- Draft text saved across restarts and synced with Slack between devices.
 - Cmd+V to attach images or files copied in Finder, in channels and threads.
   Preview/remove attachments before sending (up to 10 files, 100 MB total).
 
@@ -16,6 +19,8 @@ egui and wgpu. Inspired by old IRC clients: readable, restrained, and fast.
 Requires a recent stable Rust toolchain and Xcode Command Line Tools on macOS.
 
 ```sh
+git clone https://github.com/sleipner42/slack-rust-client.git
+cd slack-rust-client
 cargo run --release --locked
 ```
 
@@ -30,6 +35,23 @@ Keyring or KeePassXC). Credentials and cached messages stay in
 your user config and cache directories, outside this repository.
 Some features use internal Slack APIs and may change without notice.
 
+## Local data and privacy
+
+Session credentials and draft text are stored as local JSON, not in the OS
+keychain. New saves use owner-only file permissions; disk encryption remains
+the responsibility of your operating system. Draft text also syncs to Slack;
+unsent attachment data is kept in memory and does not survive restarts.
+
+App data lives under `~/Library/Application Support/better-slack` on macOS
+or `${XDG_CONFIG_HOME:-~/.config}/better-slack` on Linux. Cached messages,
+images, and videos live under `~/Library/Caches/better-slack` or
+`${XDG_CACHE_HOME:-~/.cache}/better-slack`. These folders are separate from
+the repository. Do not include them in bug reports or shared app bundles.
+
+Report security issues [privately](SECURITY.md). For ordinary bugs, open a
+GitHub issue with reproduction steps and your OS version, removing workspace
+content, credentials, and private URLs from any logs or screenshots.
+
 ## Build and check
 
 ```sh
@@ -41,5 +63,6 @@ bash scripts/package-dmg.sh    # target/dist/
 ```
 
 The current DMG build targets Apple Silicon and is ad-hoc signed, not notarized.
-Drafts are kept only while the app is open; older channel pagination is planned.
+Older channel pagination is planned. CI runs formatting, Clippy, and tests on
+macOS and Linux. CI uses synthetic test data and does not sign in to Slack.
 See [TODO.md](TODO.md) and [third-party notices](THIRD_PARTY.md).

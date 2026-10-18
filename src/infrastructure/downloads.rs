@@ -62,7 +62,11 @@ pub fn video_path(file_key: &str, name: &str) -> Result<PathBuf, SlackError> {
         .ok_or_else(|| SlackError("Could not find a cache folder.".into()))?
         .join("better-slack")
         .join("videos");
-    std::fs::create_dir_all(&directory).map_err(|error| {
+    video_path_in(&directory, file_key, name)
+}
+
+fn video_path_in(directory: &Path, file_key: &str, name: &str) -> Result<PathBuf, SlackError> {
+    super::private_file::create_directory(directory).map_err(|error| {
         SlackError(format!("Could not create {}: {error}", directory.display()))
     })?;
     let key: String = file_key
@@ -88,13 +92,8 @@ pub fn keep_video(path: &Path, bytes: &[u8]) -> Result<(), SlackError> {
             }
         }
     }
-    let partial = path.with_extension("part");
-    std::fs::write(&partial, bytes)
-        .and_then(|()| std::fs::rename(&partial, path))
-        .map_err(|error| {
-            let _ = std::fs::remove_file(&partial);
-            SlackError(format!("Could not save {}: {error}", path.display()))
-        })
+    super::private_file::write(path, bytes)
+        .map_err(|error| SlackError(format!("Could not save {}: {error}", path.display())))
 }
 
 /// Open a file in the user's default app: xdg-open on Linux, open on macOS.
@@ -155,12 +154,16 @@ mod tests {
 
     #[test]
     fn cached_videos_get_safe_unique_names() {
-        let path = video_path("F1/../x", "../../Rendered video.mp4").unwrap();
+        let directory = std::env::temp_dir().join(format!("videos-{}", uuid::Uuid::new_v4()));
+        let path = video_path_in(&directory, "F1/../x", "../../Rendered video.mp4").unwrap();
         assert_eq!(
             path.file_name().unwrap().to_str().unwrap(),
             "F1x-Rendered video.mp4"
         );
-        assert!(path.parent().unwrap().ends_with("better-slack/videos"));
+        assert_eq!(path.parent().unwrap(), directory);
+        keep_video(&path, b"video bytes").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"video bytes");
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

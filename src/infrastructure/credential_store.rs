@@ -1,6 +1,4 @@
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -23,17 +21,8 @@ impl CredentialStore {
     }
 
     pub fn save(&self, credentials: &Credentials) -> std::io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
         let content = serde_json::to_string_pretty(&StoredCredentials::from(credentials))?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(OWNER_ONLY)
-            .open(&self.path)?;
-        file.write_all(content.as_bytes())
+        super::private_file::write(&self.path, content.as_bytes())
     }
 }
 
@@ -66,5 +55,3 @@ impl From<&Credentials> for StoredCredentials {
         }
     }
 }
-
-const OWNER_ONLY: u32 = 0o600;

@@ -878,14 +878,17 @@ fn retry_delay(response: &reqwest::blocking::Response) -> Duration {
 }
 
 fn is_slack_host(url: &str) -> bool {
-    reqwest::Url::parse(url)
-        .ok()
-        .and_then(|parsed| parsed.host_str().map(str::to_string))
-        .is_some_and(|host| {
-            SLACK_HOST_SUFFIXES
-                .iter()
-                .any(|suffix| host == suffix[1..] || host.ends_with(suffix))
-        })
+    reqwest::Url::parse(url).ok().is_some_and(|parsed| {
+        parsed.scheme() == "https"
+            && parsed.username().is_empty()
+            && parsed.password().is_none()
+            && parsed.port_or_known_default() == Some(443)
+            && parsed.host_str().is_some_and(|host| {
+                SLACK_HOST_SUFFIXES
+                    .iter()
+                    .any(|suffix| host == &suffix[1..] || host.ends_with(suffix))
+            })
+    })
 }
 
 const CONVERSATION_TYPES: &str = "public_channel,private_channel,mpim,im";
@@ -907,6 +910,22 @@ fn now_ts() -> String {
 #[cfg(test)]
 mod upload_tests {
     use super::*;
+
+    #[test]
+    fn file_credentials_are_only_sent_to_standard_slack_https_hosts() {
+        assert!(is_slack_host("https://files.slack.com/file"));
+        assert!(is_slack_host("https://emoji.slack-edge.com/image"));
+        for url in [
+            "http://files.slack.com/file",
+            "https://files.slack.com:8443/file",
+            "https://files.slack.com.attacker.test/file",
+            "https://attacker.test/file",
+            "https://user@files.slack.com/file",
+            "file:///tmp/image.png",
+        ] {
+            assert!(!is_slack_host(url), "credentials must not be sent to {url}");
+        }
+    }
 
     #[test]
     fn reaction_replays_are_successful_but_real_errors_are_not_hidden() {
