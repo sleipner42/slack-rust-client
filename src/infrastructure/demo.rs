@@ -239,6 +239,9 @@ impl SlackGateway for DemoGateway {
         self.activity_reads.lock().unwrap().push(item.clone());
         Ok(())
     }
+    fn team_id(&self) -> Option<String> {
+        Some("TDEMO".into())
+    }
     fn current_user_id(&self) -> Result<String, SlackError> {
         Ok("UME".into())
     }
@@ -550,5 +553,6 @@ fn message(ts: String, author: &str, text: &str) -> Message {
         attachments: Vec::new(),
         shares: Vec::new(),
         edited: false,
+        huddle: None,
     }
 }

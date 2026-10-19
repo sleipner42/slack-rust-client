@@ -27,6 +27,7 @@ mod tests {
             attachments: vec![],
             shares: vec![],
             edited: false,
+            huddle: None,
         }
     }
 

@@ -38,6 +38,53 @@ pub fn show(title: &str, body: &str, on_click: Option<Box<dyn FnOnce() + Send>>)
     });
 }
 
+/// An incoming call, with Answer and Decline where the desktop supports
+/// notification buttons (Linux); on macOS the in-app banner has them.
+pub fn show_call(
+    title: &str,
+    body: &str,
+    on_answer: Box<dyn FnOnce() + Send>,
+    on_decline: Box<dyn FnOnce() + Send>,
+) {
+    if cfg!(test) {
+        return;
+    }
+    let (title, body) = (title.to_owned(), body.to_owned());
+    std::thread::spawn(move || {
+        let mut notification = notify_rust::Notification::new();
+        notification.summary(&title).body(&body);
+        #[cfg(target_os = "macos")]
+        set_application();
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            notification
+                .appname(APP_NAME)
+                .urgency(notify_rust::Urgency::Critical)
+                .timeout(notify_rust::Timeout::Milliseconds(CALL_TIMEOUT_MS))
+                .action("answer", "Answer")
+                .action("decline", "Decline");
+            if let Some(icon) = icon_path() {
+                notification.icon(&icon.to_string_lossy());
+            }
+        }
+        let Ok(handle) = notification.show() else {
+            return;
+        };
+        #[cfg(all(unix, not(target_os = "macos")))]
+        handle.wait_for_action(|action| match action {
+            "answer" | "default" => on_answer(),
+            "decline" => on_decline(),
+            _ => {}
+        });
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        let _ = (handle, on_answer, on_decline);
+    });
+}
+
+/// How long a call notification stays up; Slack stops ringing well before.
+#[cfg(all(unix, not(target_os = "macos")))]
+const CALL_TIMEOUT_MS: u32 = 45_000;
+
 /// Post as this app's bundle so the notification carries its name and icon.
 #[cfg(target_os = "macos")]
 fn set_application() {

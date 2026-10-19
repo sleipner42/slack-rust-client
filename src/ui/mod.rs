@@ -5,6 +5,7 @@ mod composer;
 mod dock;
 mod emoji_completion;
 mod emoji_picker;
+mod huddles;
 mod image_viewer;
 mod images;
 pub mod labels;

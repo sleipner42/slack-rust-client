@@ -25,6 +25,8 @@ pub enum MessageAction {
     SaveEdit,
     CancelEdit,
     Share(String),
+    /// Join a huddle by its link.
+    JoinHuddle(String),
     /// Open a shared message where it was posted: the thread it starts or belongs to.
     OpenShare {
         conversation_id: String,
@@ -64,6 +66,8 @@ pub struct MessageContext<'a> {
     /// Read position when the conversation was opened; later messages are new.
     pub new_after: Option<&'a str>,
     pub edit: Option<&'a mut MessageEdit>,
+    /// Live huddle state per conversation, fresher than a message's snapshot.
+    pub huddles: &'a std::collections::HashMap<String, super::huddles::LiveHuddle>,
 }
 
 #[derive(Clone, Default)]
@@ -346,6 +350,16 @@ fn message_row(
                             selecting |= edit_selecting;
                             if edit_action.is_some() {
                                 action = edit_action;
+                            }
+                        }
+                        None if message.huddle.is_some() => {
+                            let huddle = message.huddle.as_ref().unwrap();
+                            let live = context
+                                .huddles
+                                .get(&huddle.conversation_id)
+                                .filter(|live| live.huddle.id == huddle.id);
+                            if let Some(link) = super::huddles::huddle_card(ui, huddle, live) {
+                                action = Some(MessageAction::JoinHuddle(link));
                             }
                         }
                         None => {
@@ -1413,6 +1427,7 @@ mod tests {
                             "quick_reactions",
                             messages,
                             &mut MessageContext {
+                                huddles: &Default::default(),
                                 emoji: &emoji,
                                 images: &mut images,
                                 self_user_id: "me",
@@ -1635,6 +1650,7 @@ mod tests {
                                 "selection",
                                 &messages,
                                 &mut MessageContext {
+                                    huddles: &Default::default(),
                                     emoji: &workspace.emoji,
                                     images: &mut images,
                                     self_user_id: "me",
@@ -1737,6 +1753,7 @@ mod tests {
                         "share",
                         std::slice::from_ref(&message),
                         &mut MessageContext {
+                            huddles: &Default::default(),
                             emoji: &workspace.emoji,
                             images: &mut images,
                             self_user_id: "me",
@@ -1820,6 +1837,7 @@ mod tests {
                         "open_share",
                         std::slice::from_ref(&message),
                         &mut MessageContext {
+                            huddles: &Default::default(),
                             emoji: &workspace.emoji,
                             images: &mut images,
                             self_user_id: "me",
@@ -1928,6 +1946,7 @@ mod tests {
                         "image_menu",
                         std::slice::from_ref(&message),
                         &mut MessageContext {
+                            huddles: &Default::default(),
                             emoji: &workspace.emoji,
                             images: &mut images,
                             self_user_id: "me",
@@ -2013,6 +2032,7 @@ mod tests {
                         "fold",
                         messages,
                         &mut MessageContext {
+                            huddles: &Default::default(),
                             emoji: &workspace.emoji,
                             images: &mut images,
                             self_user_id: "me",
@@ -2106,6 +2126,7 @@ mod tests {
                                 "test",
                                 &messages,
                                 &mut MessageContext {
+                                    huddles: &Default::default(),
                                     emoji: &workspace.emoji,
                                     images: &mut images,
                                     self_user_id: "me",
@@ -2166,6 +2187,7 @@ mod tests {
                             "fresh_channel",
                             &messages,
                             &mut MessageContext {
+                                huddles: &Default::default(),
                                 emoji: &workspace.emoji,
                                 images: &mut images,
                                 self_user_id: "me",

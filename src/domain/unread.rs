@@ -68,6 +68,7 @@ mod tests {
             attachments: Vec::new(),
             shares: Vec::new(),
             edited: false,
+            huddle: None,
         }
     }
 

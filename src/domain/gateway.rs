@@ -122,6 +122,10 @@ pub trait SlackGateway: Send + Sync {
     fn delete_draft(&self, _id: &str) -> Result<(), SlackError> {
         Ok(())
     }
+    /// The workspace, once `current_user_id` has asked Slack who the user is.
+    fn team_id(&self) -> Option<String> {
+        None
+    }
     /// One page of messages matching a Slack search query.
     fn search_messages(
         &self,

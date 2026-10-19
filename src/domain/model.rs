@@ -99,6 +99,36 @@ pub struct Message {
     pub attachments: Vec<Attachment>,
     pub shares: Vec<SharedMessage>,
     pub edited: bool,
+    /// The huddle a "huddle started" message stands for.
+    pub huddle: Option<Huddle>,
+}
+
+/// A huddle (Slack's audio call) as Slack last described it.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Huddle {
+    pub id: String,
+    pub conversation_id: String,
+    /// Who is in it now.
+    pub participants: Vec<String>,
+    /// Everyone who joined at some point.
+    pub joined_ever: Vec<String>,
+    /// Opens the huddle in Slack's web client.
+    pub link: Option<String>,
+    pub ended: bool,
+    /// Unix seconds.
+    pub started: i64,
+    pub ended_at: i64,
+}
+
+/// Where Slack's web client opens (or starts) a conversation's huddle.
+pub fn huddle_link(team_id: &str, conversation_id: &str) -> String {
+    format!("https://app.slack.com/huddle/{team_id}/{conversation_id}")
+}
+
+impl Huddle {
+    pub fn is_live(&self) -> bool {
+        !self.ended && !self.participants.is_empty()
+    }
 }
 
 /// An unsent message saved in Slack, so it follows the user between devices.
@@ -201,6 +231,19 @@ pub enum LiveEvent {
     /// A draft was sent or discarded.
     DraftDeleted {
         id: String,
+    },
+    /// A huddle started, changed who is in it, or ended.
+    HuddleChanged(Huddle),
+    /// Someone is calling the user into a huddle.
+    HuddleRinging {
+        conversation_id: String,
+        caller_id: String,
+        link: String,
+    },
+    /// The call stopped ringing: the caller hung up, or the user answered or
+    /// declined somewhere else.
+    HuddleRingStopped {
+        conversation_id: String,
     },
 }
 

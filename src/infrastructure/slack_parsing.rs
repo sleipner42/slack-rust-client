@@ -3,9 +3,9 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 
 use crate::domain::model::{
-    Attachment, Author, Conversation, ConversationKind, LiveEvent, Message, Reaction, ReadState,
-    RemoteDraft, SavedTodo, SavedTodoPage, SectionKind, SharedMessage, SidebarSection, SlackError,
-    UserProfile,
+    Attachment, Author, Conversation, ConversationKind, Huddle, LiveEvent, Message, Reaction,
+    ReadState, RemoteDraft, SavedTodo, SavedTodoPage, SectionKind, SharedMessage, SidebarSection,
+    SlackError, UserProfile,
 };
 
 pub fn parse_saved_todos(body: &Value, completed: bool) -> Result<SavedTodoPage, SlackError> {
@@ -86,6 +86,38 @@ pub fn parse_message(item: &Value) -> Option<Message> {
             .map(parse_share)
             .collect(),
         edited: item["edited"].is_object(),
+        huddle: item["room"]
+            .is_object()
+            .then(|| parse_huddle(&item["room"], item["channel"].as_str()))
+            .flatten(),
+    })
+}
+
+/// A huddle from Slack's `room` object.
+pub fn parse_huddle(room: &Value, conversation_id: Option<&str>) -> Option<Huddle> {
+    if room["call_family"]
+        .as_str()
+        .is_some_and(|family| family != "huddle")
+    {
+        return None;
+    }
+    let ids = |value: &Value| -> Vec<String> {
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|id| id.as_str().map(str::to_owned))
+            .collect()
+    };
+    Some(Huddle {
+        id: room["id"].as_str()?.to_owned(),
+        conversation_id: conversation_id.or(room["channels"][0].as_str())?.to_owned(),
+        participants: ids(&room["participants"]),
+        joined_ever: ids(&room["participant_history"]),
+        link: room["huddle_link"].as_str().map(str::to_owned),
+        ended: room["has_ended"].as_bool().unwrap_or(false),
+        started: room["date_start"].as_i64().unwrap_or(0),
+        ended_at: room["date_end"].as_i64().unwrap_or(0),
     })
 }
 
@@ -186,6 +218,23 @@ pub fn parse_live_event(event: &Value) -> Option<LiveEvent> {
             id: event["draft_id"].as_str()?.to_string(),
         }),
         "message" => parse_message_event(event),
+        "sh_room_join" | "sh_room_leave" | "sh_room_update" => Some(LiveEvent::HuddleChanged(
+            parse_huddle(&event["room"], event["huddle"]["channel_id"].as_str())?,
+        )),
+        "huddle_invite" => {
+            let conversation_id = event["channel_id"].as_str()?.to_owned();
+            Some(LiveEvent::HuddleRinging {
+                link: crate::domain::model::huddle_link(
+                    event["team_id"].as_str()?,
+                    &conversation_id,
+                ),
+                conversation_id,
+                caller_id: event["sender_user_id"].as_str()?.to_owned(),
+            })
+        }
+        "huddle_invite_cancel" => Some(LiveEvent::HuddleRingStopped {
+            conversation_id: event["channel_id"].as_str()?.to_owned(),
+        }),
         "channel_marked" | "group_marked" | "im_marked" | "mpim_marked" => {
             Some(LiveEvent::ConversationMarked {
                 conversation_id: event["channel"].as_str()?.to_string(),
@@ -908,5 +957,49 @@ mod todo_tests {
         assert_eq!(reply.conversation_name, "ops");
         assert_eq!(direct.thread_ts, None);
         assert!(!direct.is_channel);
+    }
+
+    #[test]
+    fn huddle_events_ring_track_participants_and_stop() {
+        let room = json!({
+            "id": "R1", "call_family": "huddle", "channels": ["D1"],
+            "participants": ["U1"], "participant_history": ["U1"],
+            "huddle_link": "https://app.slack.com/huddle/T1/D1",
+            "has_ended": false, "date_start": 1000, "date_end": 0
+        });
+        let joined = parse_live_event(&json!({
+            "type": "sh_room_join", "user": "U1", "huddle": {"channel_id": "D1"}, "room": room
+        }));
+        let Some(LiveEvent::HuddleChanged(huddle)) = joined else {
+            panic!("a huddle change: {joined:?}");
+        };
+        assert_eq!(huddle.conversation_id, "D1");
+        assert_eq!(huddle.participants, ["U1"]);
+        assert!(huddle.is_live());
+        assert_eq!(
+            parse_live_event(&json!({
+                "type": "huddle_invite", "call_id": "R1", "channel_id": "D1",
+                "sender_user_id": "U1", "team_id": "T1", "free_willy": {}
+            })),
+            Some(LiveEvent::HuddleRinging {
+                conversation_id: "D1".into(),
+                caller_id: "U1".into(),
+                link: "https://app.slack.com/huddle/T1/D1".into(),
+            })
+        );
+        assert_eq!(
+            parse_live_event(
+                &json!({"type": "huddle_invite_cancel", "channel_id": "D1", "team_id": "T1"})
+            ),
+            Some(LiveEvent::HuddleRingStopped {
+                conversation_id: "D1".into()
+            })
+        );
+        let message = parse_message(&json!({
+            "type": "message", "subtype": "huddle_thread", "user": "USLACKBOT",
+            "ts": "1000.000100", "channel": "D1", "text": "", "room": room
+        }))
+        .unwrap();
+        assert_eq!(message.huddle.unwrap().id, "R1");
     }
 }

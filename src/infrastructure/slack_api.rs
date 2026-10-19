@@ -24,6 +24,7 @@ pub struct SlackHttpGateway {
     credentials: Credentials,
     file_previews: Mutex<HashMap<String, (Instant, Option<Attachment>)>>,
     bot_profiles: Mutex<HashMap<String, UserProfile>>,
+    team_id: Mutex<Option<String>>,
 }
 
 impl SlackHttpGateway {
@@ -37,6 +38,7 @@ impl SlackHttpGateway {
             credentials,
             file_previews: Mutex::new(HashMap::new()),
             bot_profiles: Mutex::new(HashMap::new()),
+            team_id: Mutex::new(None),
         }
     }
 
@@ -505,6 +507,9 @@ impl SlackGateway for SlackHttpGateway {
 
     fn current_user_id(&self) -> Result<String, SlackError> {
         let body = self.call("auth.test", &[])?;
+        if let Some(team) = body["team_id"].as_str() {
+            *self.team_id.lock().unwrap() = Some(team.to_owned());
+        }
         body["user_id"]
             .as_str()
             .map(str::to_string)
@@ -757,6 +762,10 @@ impl SlackGateway for SlackHttpGateway {
             .as_str()
             .map(str::to_owned)
             .ok_or_else(|| SlackError("Slack returned no link for this message.".into()))
+    }
+
+    fn team_id(&self) -> Option<String> {
+        self.team_id.lock().unwrap().clone()
     }
 
     fn search_messages(

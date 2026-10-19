@@ -36,6 +36,9 @@ pub struct DisplayMessage {
     #[serde(default)]
     pub text: String,
     pub edited: bool,
+    /// The huddle a "huddle started" message stands for.
+    #[serde(default)]
+    pub huddle: Option<crate::domain::model::Huddle>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -396,6 +399,24 @@ impl ChatService {
         })
     }
 
+    /// Where Slack's web client opens (or starts) a conversation's huddle.
+    pub fn huddle_link(&self, conversation_id: &str) -> Option<String> {
+        let team = self.gateway.team_id()?;
+        Some(crate::domain::model::huddle_link(&team, conversation_id))
+    }
+
+    /// People's names, looking up any not seen yet.
+    pub fn user_names(&self, user_ids: &[String]) -> Vec<String> {
+        self.prefetch_profiles(user_ids);
+        user_ids.iter().map(|id| self.profile(id).name).collect()
+    }
+
+    /// A person's name and avatar, looking them up if needed.
+    pub fn user(&self, user_id: &str) -> UserProfile {
+        self.prefetch_profiles(&[user_id.to_owned()]);
+        self.profile(user_id)
+    }
+
     pub fn drafts(&self) -> Result<Vec<crate::domain::model::RemoteDraft>, SlackError> {
         self.gateway.drafts()
     }
@@ -554,6 +575,7 @@ impl ChatService {
             shares: vec![],
             text: text.into(),
             edited: false,
+            huddle: None,
         }
     }
 
@@ -870,6 +892,7 @@ fn display_message(
             .collect(),
         text: message.text.clone(),
         edited: message.edited,
+        huddle: message.huddle.clone(),
     };
     // Resolved mention names can wrap differently even if the raw text is unchanged.
     display.update_layout_key();
