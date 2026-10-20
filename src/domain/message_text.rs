@@ -471,32 +471,58 @@ impl EditableText {
         Self { text, tokens }
     }
 
-    pub fn restore(&self, edited: &str) -> String {
-        let mut markup = String::with_capacity(edited.len());
-        let mut rest = edited;
-        'outer: while let Some(next) = rest.chars().next() {
-            for (label, token) in &self.tokens {
-                if let Some(after) = rest.strip_prefix(label.as_str())
-                    && !after
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
-                {
-                    markup.push_str(token);
-                    rest = after;
-                    continue 'outer;
-                }
+    /// Also restore these labels, such as people mentioned while editing.
+    pub fn with_mentions(mut self, mentions: &[(String, String)]) -> Self {
+        for mention in mentions {
+            if !self.tokens.iter().any(|(label, _)| *label == mention.0) {
+                self.tokens.push(mention.clone());
             }
-            match next {
-                '&' => markup.push_str("&amp;"),
-                '<' => markup.push_str("&lt;"),
-                '>' => markup.push_str("&gt;"),
-                c => markup.push(c),
-            }
-            rest = &rest[next.len_utf8()..];
         }
-        markup
+        self.tokens
+            .sort_by_key(|(label, _)| std::cmp::Reverse(label.len()));
+        self
     }
+
+    pub fn restore(&self, edited: &str) -> String {
+        replace_labels(edited, &self.tokens, true)
+    }
+}
+
+/// A new message with the people picked while typing it mentioned: each
+/// `@Name` label becomes Slack's `<@U…>` markup.
+pub fn link_mentions(text: &str, mentions: &[(String, String)]) -> String {
+    let mut tokens = mentions.to_vec();
+    tokens.sort_by_key(|(label, _)| std::cmp::Reverse(label.len()));
+    replace_labels(text, &tokens, false)
+}
+
+/// Replace whole-word labels with their markup, longest label first, and
+/// optionally escape what Slack treats as markup.
+fn replace_labels(text: &str, tokens: &[(String, String)], escape: bool) -> String {
+    let mut markup = String::with_capacity(text.len());
+    let mut rest = text;
+    'outer: while let Some(next) = rest.chars().next() {
+        for (label, token) in tokens {
+            if let Some(after) = rest.strip_prefix(label.as_str())
+                && !after
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_')
+            {
+                markup.push_str(token);
+                rest = after;
+                continue 'outer;
+            }
+        }
+        match next {
+            '&' if escape => markup.push_str("&amp;"),
+            '<' if escape => markup.push_str("&lt;"),
+            '>' if escape => markup.push_str("&gt;"),
+            c => markup.push(c),
+        }
+        rest = &rest[next.len_utf8()..];
+    }
+    markup
 }
 
 enum EditLabel {
@@ -761,6 +787,23 @@ mod tests {
         assert_eq!(
             editable.restore("@name-U1x and @name-U1, 1 > 0"),
             "@name-U1x and <@U1>, 1 &gt; 0"
+        );
+    }
+
+    #[test]
+    fn picked_people_become_mentions() {
+        let picked = [
+            ("@Axel".to_string(), "<@U1>".to_string()),
+            ("@Axel Wennström".to_string(), "<@U2>".to_string()),
+        ];
+        assert_eq!(
+            link_mentions("hej @Axel Wennström och @Axel, @Axelsson & co", &picked),
+            "hej <@U2> och <@U1>, @Axelsson & co"
+        );
+        let editable = EditableText::new("hi <@U1>", &Names).with_mentions(&picked[1..]);
+        assert_eq!(
+            editable.restore("hi @name-U1 and @Axel Wennström"),
+            "hi <@U1> and <@U2>"
         );
     }
 

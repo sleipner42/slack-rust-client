@@ -1,40 +1,72 @@
-//! Emoji suggestions while typing `:name`, as in Slack: arrows choose, Tab or
-//! Enter inserts, Escape dismisses. Custom workspace emoji included.
+//! Suggestions while typing, as in Slack: `:name` for emoji (custom workspace
+//! emoji included) and `@name` for people. Arrows choose, Tab or Enter
+//! inserts, Escape dismisses.
 
 use eframe::egui;
 
 use super::images::ImageCache;
 use super::theme;
 use crate::application::emoji_catalog::EmojiCatalog;
+use crate::domain::people::{self, Person};
 
 pub struct EmojiCompletion<'a> {
     pub emoji: &'a EmojiCatalog,
+    pub people: &'a [Person],
+    /// People to suggest first: those the user has conversations with.
+    pub preferred: &'a [String],
     pub images: &'a mut ImageCache,
 }
+
+/// A person picked from the suggestions: the name inserted, and the Slack
+/// markup it stands for when sent.
+pub type Mention = (String, String);
 
 #[derive(Clone, Default)]
 struct State {
     highlighted: usize,
-    /// The `:` position the user dismissed with Escape.
+    /// The trigger position the user dismissed with Escape.
     dismissed: Option<usize>,
 }
 
-/// The `:query` before the cursor: the char index of the colon and the query.
-fn query_at(text: &str, cursor: usize) -> Option<(usize, String)> {
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Trigger {
+    Emoji,
+    Person,
+}
+
+#[derive(Clone)]
+enum Suggestion {
+    Emoji(String),
+    Person(Person),
+}
+
+/// The `:query` or `@query` before the cursor: the char index of the trigger,
+/// which it is, and the query.
+fn query_at(text: &str, cursor: usize) -> Option<(usize, Trigger, String)> {
     let chars: Vec<char> = text.chars().collect();
     let cursor = cursor.min(chars.len());
     let mut start = cursor;
     while start > 0 && is_name_char(chars[start - 1]) {
         start -= 1;
     }
-    let colon = start.checked_sub(1)?;
-    let before_ok = colon == 0 || !chars[colon - 1].is_alphanumeric();
+    let at = start.checked_sub(1)?;
+    let before_ok = at == 0 || !chars[at - 1].is_alphanumeric();
     let query: String = chars[start..cursor].iter().collect();
-    (chars[colon] == ':' && before_ok && query.chars().count() >= MIN_QUERY)
-        .then_some((colon, query))
+    let trigger = match chars[at] {
+        ':' if query.chars().all(is_emoji_char) && query.chars().count() >= MIN_EMOJI_QUERY => {
+            Trigger::Emoji
+        }
+        '@' => Trigger::Person,
+        _ => return None,
+    };
+    before_ok.then_some((at, trigger, query))
 }
 
 fn is_name_char(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, '_' | '+' | '-' | '.')
+}
+
+fn is_emoji_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '_' | '+' | '-')
 }
 
@@ -54,28 +86,49 @@ fn active(
     ui: &egui::Ui,
     id: egui::Id,
     text: &str,
-    emoji: &EmojiCatalog,
-) -> Option<(usize, usize, Vec<String>, State)> {
+    completion: &EmojiCompletion<'_>,
+) -> Option<(usize, usize, Vec<Suggestion>, State)> {
     if !ui.memory(|memory| memory.has_focus(id)) {
         return None;
     }
     let cursor = collapsed_cursor(ui.ctx(), id)?;
-    let (colon, query) = query_at(text, cursor)?;
+    let (at, trigger, query) = query_at(text, cursor)?;
     let state = ui
         .data(|data| data.get_temp::<State>(state_id(id)))
         .unwrap_or_default();
-    if state.dismissed == Some(colon) {
+    if state.dismissed == Some(at) {
         return None;
     }
-    let names = emoji.search(&query, MAX_SUGGESTIONS);
-    (!names.is_empty()).then_some((colon, cursor, names, state))
+    let suggestions: Vec<Suggestion> = match trigger {
+        Trigger::Emoji => completion
+            .emoji
+            .search(&query, MAX_SUGGESTIONS)
+            .into_iter()
+            .map(Suggestion::Emoji)
+            .collect(),
+        Trigger::Person => people::search(
+            completion.people,
+            &query,
+            completion.preferred,
+            MAX_SUGGESTIONS,
+        )
+        .into_iter()
+        .cloned()
+        .map(Suggestion::Person)
+        .collect(),
+    };
+    (!suggestions.is_empty()).then_some((at, cursor, suggestions, state))
 }
 
 /// Handle the suggestion keys before the editor and the send key see them.
-pub fn keys(ui: &egui::Ui, id: egui::Id, text: &mut String, emoji: &EmojiCatalog) {
-    let Some((colon, cursor, names, mut state)) = active(ui, id, text, emoji) else {
-        return;
-    };
+/// Returns the person inserted, if one was.
+pub fn keys(
+    ui: &egui::Ui,
+    id: egui::Id,
+    text: &mut String,
+    completion: &EmojiCompletion<'_>,
+) -> Option<Mention> {
+    let (at, cursor, suggestions, mut state) = active(ui, id, text, completion)?;
     let (up, down, accept, dismiss) = ui.input_mut(|input| {
         (
             input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
@@ -85,36 +138,41 @@ pub fn keys(ui: &egui::Ui, id: egui::Id, text: &mut String, emoji: &EmojiCatalog
             input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
         )
     });
-    state.highlighted = state.highlighted.min(names.len() - 1);
+    state.highlighted = state.highlighted.min(suggestions.len() - 1);
     if down {
-        state.highlighted = (state.highlighted + 1) % names.len();
+        state.highlighted = (state.highlighted + 1) % suggestions.len();
     }
     if up {
-        state.highlighted = (state.highlighted + names.len() - 1) % names.len();
+        state.highlighted = (state.highlighted + suggestions.len() - 1) % suggestions.len();
     }
     if dismiss {
-        state.dismissed = Some(colon);
+        state.dismissed = Some(at);
     }
     ui.data_mut(|data| data.insert_temp(state_id(id), state.clone()));
-    if accept {
-        insert(ui.ctx(), id, text, colon..cursor, &names[state.highlighted]);
-    }
+    accept
+        .then(|| {
+            insert(
+                ui.ctx(),
+                id,
+                text,
+                at..cursor,
+                &suggestions[state.highlighted],
+            )
+        })
+        .flatten()
 }
 
-/// Draw the suggestions above the cursor; a click inserts one.
+/// Draw the suggestions above the cursor; a click inserts one. Returns the
+/// person inserted, if one was.
 pub fn popup(
     ui: &egui::Ui,
     output: &egui::text_edit::TextEditOutput,
     id: egui::Id,
     text: &mut String,
     completion: &mut EmojiCompletion<'_>,
-) {
-    let Some((colon, cursor, names, state)) = active(ui, id, text, completion.emoji) else {
-        return;
-    };
-    let caret = output
-        .galley
-        .pos_from_cursor(egui::text::CCursor::new(colon));
+) -> Option<Mention> {
+    let (at, cursor, suggestions, state) = active(ui, id, text, completion)?;
+    let caret = output.galley.pos_from_cursor(egui::text::CCursor::new(at));
     let anchor = output.galley_pos + caret.left_top().to_vec2();
     let mut chosen = None;
     egui::Area::new(id.with("emoji_completion_popup"))
@@ -124,25 +182,39 @@ pub fn popup(
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_min_width(220.0);
-                for (index, name) in names.iter().enumerate() {
-                    let selected = index == state.highlighted.min(names.len() - 1);
+                for (index, suggestion) in suggestions.iter().enumerate() {
+                    let selected = index == state.highlighted.min(suggestions.len() - 1);
+                    let (image_url, label, detail) = match suggestion {
+                        Suggestion::Emoji(name) => {
+                            (completion.emoji.image_url(name), format!(":{name}:"), None)
+                        }
+                        Suggestion::Person(person) => (
+                            person.avatar_url.clone(),
+                            person.name.clone(),
+                            (person.real_name != person.name && !person.real_name.is_empty())
+                                .then(|| person.real_name.clone()),
+                        ),
+                    };
                     let row = ui.horizontal(|ui| {
                         let (rect, _) =
                             ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
-                        if let Some(image) = completion
-                            .emoji
-                            .image_url(name)
-                            .and_then(|url| completion.images.image(&url))
+                        if let Some(image) = image_url.and_then(|url| completion.images.image(&url))
                         {
                             image.paint_at(ui, rect);
                         }
-                        ui.add(
-                            egui::Button::selectable(selected, format!(":{name}:"))
-                                .frame_when_inactive(selected),
-                        )
+                        let clicked = ui
+                            .add(
+                                egui::Button::selectable(selected, label)
+                                    .frame_when_inactive(selected),
+                            )
+                            .clicked();
+                        if let Some(detail) = detail {
+                            ui.label(egui::RichText::new(detail).small().color(theme::TEXT_MUTED));
+                        }
+                        clicked
                     });
-                    if row.inner.clicked() {
-                        chosen = Some(name.clone());
+                    if row.inner {
+                        chosen = Some(suggestion.clone());
                     }
                 }
                 ui.label(
@@ -152,10 +224,10 @@ pub fn popup(
                 );
             });
         });
-    if let Some(name) = chosen {
-        insert(ui.ctx(), id, text, colon..cursor, &name);
-        super::markup_editor::request_refocus(ui.ctx(), id);
-    }
+    let chosen = chosen?;
+    let mention = insert(ui.ctx(), id, text, at..cursor, &chosen);
+    super::markup_editor::request_refocus(ui.ctx(), id);
+    mention
 }
 
 fn insert(
@@ -163,15 +235,21 @@ fn insert(
     id: egui::Id,
     text: &mut String,
     chars: std::ops::Range<usize>,
-    name: &str,
-) {
+    suggestion: &Suggestion,
+) -> Option<Mention> {
     let byte = |index: usize| {
         text.char_indices()
             .nth(index)
             .map_or(text.len(), |(byte, _)| byte)
     };
     let range = byte(chars.start)..byte(chars.end);
-    let inserted = format!(":{name}: ");
+    let (inserted, mention) = match suggestion {
+        Suggestion::Emoji(name) => (format!(":{name}: "), None),
+        Suggestion::Person(person) => (
+            format!("{} ", person.label()),
+            Some((person.label(), person.markup())),
+        ),
+    };
     text.replace_range(range, &inserted);
     let mut state = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
     state
@@ -181,9 +259,10 @@ fn insert(
         )));
     state.store(ctx, id);
     ctx.data_mut(|data| data.remove_temp::<State>(state_id(id)));
+    mention
 }
 
-const MIN_QUERY: usize = 2;
+const MIN_EMOJI_QUERY: usize = 2;
 const MAX_SUGGESTIONS: usize = 8;
 
 #[cfg(test)]
@@ -192,11 +271,36 @@ mod tests {
 
     #[test]
     fn finds_the_emoji_query_before_the_cursor() {
-        assert_eq!(query_at("hi :pa", 6), Some((3, "pa".into())));
-        assert_eq!(query_at(":party_p", 8), Some((0, "party_p".into())));
-        assert_eq!(query_at("hi :p", 5), None, "too short");
-        assert_eq!(query_at("at 12:30", 8), None, "not after a digit");
-        assert_eq!(query_at("hi :pa x", 8), None, "the query ended");
-        assert_eq!(query_at(":tada: ok", 9), None);
+        let emoji = |text: &str, cursor| {
+            query_at(text, cursor)
+                .filter(|(_, trigger, _)| *trigger == Trigger::Emoji)
+                .map(|(at, _, query)| (at, query))
+        };
+        assert_eq!(emoji("hi :pa", 6), Some((3, "pa".into())));
+        assert_eq!(emoji(":party_p", 8), Some((0, "party_p".into())));
+        assert_eq!(emoji("hi :p", 5), None, "too short");
+        assert_eq!(emoji("at 12:30", 8), None, "not after a digit");
+        assert_eq!(emoji("hi :pa x", 8), None, "the query ended");
+        assert_eq!(emoji(":tada: ok", 9), None);
+    }
+
+    #[test]
+    fn finds_the_person_query_before_the_cursor() {
+        assert_eq!(query_at("@", 1), Some((0, Trigger::Person, String::new())));
+        assert_eq!(
+            query_at("hej @axel", 9),
+            Some((4, Trigger::Person, "axel".into()))
+        );
+        assert_eq!(
+            query_at("@max.a", 6),
+            Some((0, Trigger::Person, "max.a".into()))
+        );
+        assert_eq!(
+            query_at("@wennström", 10),
+            Some((0, Trigger::Person, "wennström".into())),
+            "letters beyond ASCII"
+        );
+        assert_eq!(query_at("mail me@home", 12), None, "an address");
+        assert_eq!(query_at("@axel hi", 8), None, "the query ended");
     }
 }

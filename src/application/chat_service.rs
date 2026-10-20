@@ -76,6 +76,8 @@ pub struct Workspace {
     pub emoji: EmojiCatalog,
     /// Emoji use as Slack's own clients recorded it.
     pub emoji_usage: crate::domain::emoji_usage::EmojiUsage,
+    /// Everyone who can be mentioned; loaded after the rest.
+    pub people: Arc<Vec<crate::domain::people::Person>>,
 }
 
 pub struct ChatService {
@@ -396,6 +398,7 @@ impl ChatService {
             muted,
             emoji,
             emoji_usage,
+            people: Default::default(),
         })
     }
 
@@ -454,6 +457,25 @@ impl ChatService {
     }
 
     /// The workspace's custom emoji, fetched again.
+    /// The workspace's people; their names also answer later name lookups.
+    pub fn people(&self) -> Result<Vec<crate::domain::people::Person>, SlackError> {
+        let people = self.gateway.list_people()?;
+        let mut profiles = self
+            .profiles
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        for person in &people {
+            profiles
+                .entry(person.id.clone())
+                .or_insert_with(|| UserProfile {
+                    id: person.id.clone(),
+                    name: person.name.clone(),
+                    avatar_url: person.avatar_url.clone(),
+                });
+        }
+        Ok(people)
+    }
+
     pub fn emoji_catalog(&self) -> Result<EmojiCatalog, SlackError> {
         Ok(EmojiCatalog::new(self.gateway.custom_emoji()?))
     }

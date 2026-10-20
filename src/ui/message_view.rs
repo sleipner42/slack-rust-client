@@ -40,6 +40,8 @@ pub struct MessageEdit {
     pub text: String,
     pub saving: bool,
     pub error: Option<String>,
+    /// People picked from the `@` suggestions while editing.
+    pub mentions: Vec<super::emoji_completion::Mention>,
     focus: bool,
     ime_active: bool,
 }
@@ -51,6 +53,7 @@ impl MessageEdit {
             text,
             saving: false,
             error: None,
+            mentions: Vec::new(),
             focus: true,
             ime_active: false,
         }
@@ -70,6 +73,9 @@ pub struct MessageContext<'a> {
     pub huddles: &'a std::collections::HashMap<String, super::huddles::LiveHuddle>,
     /// The conversation whose huddle the user is in.
     pub huddle_call: Option<&'a str>,
+    /// Who can be mentioned while editing, and who to suggest first.
+    pub people: &'a [crate::domain::people::Person],
+    pub preferred: &'a [String],
 }
 
 #[derive(Clone, Default)]
@@ -346,6 +352,8 @@ fn message_row(
                         Some(edit) => {
                             let completion = super::emoji_completion::EmojiCompletion {
                                 emoji: context.emoji,
+                                people: context.people,
+                                preferred: context.preferred,
                                 images: context.images,
                             };
                             let (edit_action, edit_selecting) = edit_box(ui, edit, completion);
@@ -639,7 +647,9 @@ fn edit_box(
     super::markup_editor::restore_focus(ui, id);
     let mut action = None;
     if ui.memory(|memory| memory.has_focus(id)) && !edit.saving {
-        super::emoji_completion::keys(ui, id, &mut edit.text, completion.emoji);
+        if let Some(mention) = super::emoji_completion::keys(ui, id, &mut edit.text, &completion) {
+            edit.mentions.push(mention);
+        }
         super::markup_editor::shortcuts(ui, id, &mut edit.text);
         let (submit, cancel) = ui.input_mut(|input| {
             (
@@ -688,7 +698,11 @@ fn edit_box(
                 .interactive(!edit.saving)
                 .show(ui);
             super::markup_editor::spelling(ui, &output, id, &mut edit.text);
-            super::emoji_completion::popup(ui, &output, id, &mut edit.text, &mut completion);
+            if let Some(mention) =
+                super::emoji_completion::popup(ui, &output, id, &mut edit.text, &mut completion)
+            {
+                edit.mentions.push(mention);
+            }
             // The timeline scrolls at its edges while a selection is dragged here.
             output.response.dragged_by(egui::PointerButton::Primary)
         })
@@ -1434,6 +1448,8 @@ mod tests {
                             &mut MessageContext {
                                 huddles: &Default::default(),
                                 huddle_call: None,
+                                people: &[],
+                                preferred: &[],
                                 emoji: &emoji,
                                 images: &mut images,
                                 self_user_id: "me",
@@ -1658,6 +1674,8 @@ mod tests {
                                 &mut MessageContext {
                                     huddles: &Default::default(),
                                     huddle_call: None,
+                                    people: &[],
+                                    preferred: &[],
                                     emoji: &workspace.emoji,
                                     images: &mut images,
                                     self_user_id: "me",
@@ -1762,6 +1780,8 @@ mod tests {
                         &mut MessageContext {
                             huddles: &Default::default(),
                             huddle_call: None,
+                            people: &[],
+                            preferred: &[],
                             emoji: &workspace.emoji,
                             images: &mut images,
                             self_user_id: "me",
@@ -1847,6 +1867,8 @@ mod tests {
                         &mut MessageContext {
                             huddles: &Default::default(),
                             huddle_call: None,
+                            people: &[],
+                            preferred: &[],
                             emoji: &workspace.emoji,
                             images: &mut images,
                             self_user_id: "me",
@@ -1957,6 +1979,8 @@ mod tests {
                         &mut MessageContext {
                             huddles: &Default::default(),
                             huddle_call: None,
+                            people: &[],
+                            preferred: &[],
                             emoji: &workspace.emoji,
                             images: &mut images,
                             self_user_id: "me",
@@ -2044,6 +2068,8 @@ mod tests {
                         &mut MessageContext {
                             huddles: &Default::default(),
                             huddle_call: None,
+                            people: &[],
+                            preferred: &[],
                             emoji: &workspace.emoji,
                             images: &mut images,
                             self_user_id: "me",
@@ -2139,6 +2165,8 @@ mod tests {
                                 &mut MessageContext {
                                     huddles: &Default::default(),
                                     huddle_call: None,
+                                    people: &[],
+                                    preferred: &[],
                                     emoji: &workspace.emoji,
                                     images: &mut images,
                                     self_user_id: "me",
@@ -2201,6 +2229,8 @@ mod tests {
                             &mut MessageContext {
                                 huddles: &Default::default(),
                                 huddle_call: None,
+                                people: &[],
+                                preferred: &[],
                                 emoji: &workspace.emoji,
                                 images: &mut images,
                                 self_user_id: "me",

@@ -13,9 +13,10 @@ use crate::domain::model::{
     Attachment, Author, ChimeJoin, Conversation, Credentials, Message, ReadState, RemoteDraft,
     SavedMessage, SavedTodo, SavedTodoPage, SidebarSection, SlackError, UserProfile,
 };
+use crate::domain::people::Person;
 use crate::infrastructure::slack_parsing::{
     next_cursor, order_sections, parse_attachment, parse_chime_join, parse_conversations,
-    parse_custom_emoji, parse_draft, parse_message, parse_muted, parse_read_states,
+    parse_custom_emoji, parse_draft, parse_message, parse_muted, parse_person, parse_read_states,
     parse_saved_todos, parse_search, parse_section, parse_user_profile,
 };
 
@@ -757,6 +758,28 @@ impl SlackGateway for SlackHttpGateway {
             .as_str()
             .map(str::to_owned)
             .ok_or_else(|| SlackError("Slack returned no link for this message.".into()))
+    }
+
+    fn list_people(&self) -> Result<Vec<Person>, SlackError> {
+        let mut people = Vec::new();
+        let mut cursor = String::new();
+        loop {
+            let body = self.call(
+                "users.list",
+                &[("limit", PAGE_SIZE), ("cursor", cursor.as_str())],
+            )?;
+            people.extend(
+                body["members"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(parse_person),
+            );
+            cursor = next_cursor(&body);
+            if cursor.is_empty() {
+                return Ok(people);
+            }
+        }
     }
 
     fn join_huddle(&self, conversation_id: &str) -> Result<ChimeJoin, SlackError> {

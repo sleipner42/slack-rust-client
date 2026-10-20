@@ -176,6 +176,7 @@ enum UiEvent {
     Marked(String, String, Result<(), SlackError>),
     Counts(u64, Result<HashMap<String, ReadState>, SlackError>),
     EmojiLoaded(Result<crate::application::emoji_catalog::EmojiCatalog, SlackError>),
+    PeopleLoaded(Result<Vec<crate::domain::people::Person>, SlackError>),
     DraftsListed(Result<Vec<crate::domain::model::RemoteDraft>, SlackError>),
     DraftPushed(
         crate::application::draft_sync::Push,
@@ -1005,6 +1006,8 @@ impl ChatApp {
                                         .huddles
                                         .call()
                                         .map(|call| call.conversation_id.as_str()),
+                                    people: &workspace.people,
+                                    preferred: &preferred_people(workspace),
                                     emoji: &workspace.emoji,
                                     images: &mut self.images,
                                     self_user_id: &workspace.self_user_id,
@@ -1210,6 +1213,8 @@ impl ChatApp {
                                     .huddles
                                     .call()
                                     .map(|call| call.conversation_id.as_str()),
+                                people: &workspace.people,
+                                preferred: &preferred_people(workspace),
                                 emoji: &workspace.emoji,
                                 images: &mut self.images,
                                 self_user_id: &workspace.self_user_id,
@@ -1265,18 +1270,57 @@ impl ChatApp {
                 ui.ctx().request_repaint();
             }
         }
+        let preferred = self
+            .workspace
+            .as_ref()
+            .map(preferred_people)
+            .unwrap_or_default();
         let completion =
             self.workspace
                 .as_ref()
                 .map(|workspace| crate::ui::emoji_completion::EmojiCompletion {
                     emoji: &workspace.emoji,
+                    people: &workspace.people,
+                    preferred: &preferred,
                     images: &mut self.images,
                 });
         if composer(ui, target, draft, hint, completion) {
             let text = std::mem::take(&mut draft.text);
+            let mentions = std::mem::take(&mut draft.mentions);
             let files = draft.attachments.take();
+            let text = crate::domain::message_text::link_mentions(
+                &text,
+                &self.mention_tokens(&text, mentions),
+            );
             self.queue_message(target.clone(), text, files);
         }
+    }
+
+    /// The people to mention in `text`: those picked from the suggestions,
+    /// and anyone else written out as `@Full Name` whose name is unique.
+    fn mention_tokens(
+        &self,
+        text: &str,
+        mut picked: Vec<crate::ui::emoji_completion::Mention>,
+    ) -> Vec<crate::ui::emoji_completion::Mention> {
+        let Some(workspace) = &self.workspace else {
+            return picked;
+        };
+        for person in workspace.people.iter() {
+            let label = person.label();
+            if text.contains(&label)
+                && !picked.iter().any(|(picked, _)| *picked == label)
+                && workspace
+                    .people
+                    .iter()
+                    .filter(|other| other.name == person.name)
+                    .count()
+                    == 1
+            {
+                picked.push((label, person.markup()));
+            }
+        }
+        picked
     }
 
     fn queue_message(
@@ -1635,10 +1679,17 @@ impl ChatApp {
             self.editing = None;
             return;
         };
+        let Some((_, edit)) = &self.editing else {
+            return;
+        };
+        let mentions = self.mention_tokens(&edit.text, edit.mentions.clone());
         let Some((_, edit)) = &mut self.editing else {
             return;
         };
-        let editable = self.service.editable_text(&original);
+        let editable = self
+            .service
+            .editable_text(&original)
+            .with_mentions(&mentions);
         let text = editable.restore(&edit.text);
         if edit.text == editable.text || text == original {
             self.editing = None;
@@ -1867,6 +1918,7 @@ impl ChatApp {
                             }
                             self.workspace = Some(workspace);
                             self.refresh_frequent_emoji();
+                            self.spawn(|service| UiEvent::PeopleLoaded(service.people()));
                             self.status = None;
                             if let Some(source) = self.realtime.take() {
                                 let sender = self.sender.clone();
@@ -1977,6 +2029,11 @@ impl ChatApp {
                     };
                     self.draft_sync
                         .pushed(key, text, result.map_err(|_| ()), now);
+                }
+                UiEvent::PeopleLoaded(result) => {
+                    if let (Ok(people), Some(workspace)) = (result, &mut self.workspace) {
+                        workspace.people = Arc::new(people);
+                    }
                 }
                 UiEvent::EmojiLoaded(result) => {
                     if let (Ok(emoji), Some(workspace)) = (result, &mut self.workspace) {
@@ -2716,6 +2773,20 @@ impl ChatApp {
     }
 }
 
+/// People to suggest first for `@`: those the user has DMs with.
+fn preferred_people(workspace: &Workspace) -> Vec<String> {
+    workspace
+        .conversations
+        .iter()
+        .filter_map(|conversation| match &conversation.kind {
+            crate::domain::model::ConversationKind::DirectMessage { user_id } => {
+                Some(user_id.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn target_of(conversation_id: &str) -> ComposeTarget {
     ComposeTarget {
         conversation_id: conversation_id.into(),
@@ -3069,10 +3140,17 @@ mod tests {
             output.textures_delta.clear();
         }
         assert!(app.share.is_none(), "sharing closes the dialog");
-        let event = app.receiver.recv_timeout(Duration::from_secs(5)).unwrap();
-        app.sender.send(event).unwrap();
-        app.drain_events();
-        let request = requests.try_recv().expect("the share is sent");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let request = loop {
+            let event = app.receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+            app.sender.send(event).unwrap();
+            app.drain_events();
+            match requests.try_recv() {
+                Ok(request) => break request,
+                Err(_) if Instant::now() < deadline => {}
+                Err(error) => panic!("the share is sent: {error}"),
+            }
+        };
         assert_eq!(request.target, target("C2"));
         assert_eq!(
             request.text,
@@ -3116,9 +3194,12 @@ mod tests {
         edit.text = "hello & goodbye".into();
         app.message_action(target.clone(), MessageAction::SaveEdit);
         assert!(app.editing.as_ref().is_some_and(|(_, edit)| edit.saving));
-        let event = app.receiver.recv_timeout(Duration::from_secs(5)).unwrap();
-        app.sender.send(event).unwrap();
-        app.drain_events();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.editing.is_some() && Instant::now() < deadline {
+            let event = app.receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+            app.sender.send(event).unwrap();
+            app.drain_events();
+        }
         assert!(app.editing.is_none());
         let shown = app.messages.last().unwrap();
         assert!(shown.edited);

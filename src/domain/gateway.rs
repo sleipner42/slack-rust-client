@@ -122,6 +122,10 @@ pub trait SlackGateway: Send + Sync {
     fn delete_draft(&self, _id: &str) -> Result<(), SlackError> {
         Ok(())
     }
+    /// Everyone in the workspace who can be mentioned.
+    fn list_people(&self) -> Result<Vec<super::people::Person>, SlackError> {
+        Ok(Vec::new())
+    }
     /// Join a conversation's huddle, starting one (and in a DM, ringing the
     /// other person) when there is none.
     fn join_huddle(&self, _conversation_id: &str) -> Result<super::model::ChimeJoin, SlackError> {

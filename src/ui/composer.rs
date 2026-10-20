@@ -16,6 +16,8 @@ impl ComposeTarget {
 pub struct Draft {
     pub text: String,
     pub attachments: super::attachments::Attachments,
+    /// People picked from the `@` suggestions, mentioned when sent.
+    pub mentions: Vec<super::emoji_completion::Mention>,
     ime_active: bool,
 }
 
@@ -31,8 +33,11 @@ pub fn composer(
     super::markup_editor::restore_focus(ui, id);
     let focused = ui.is_enabled() && ui.memory(|memory| memory.has_focus(id));
     if focused {
-        if let Some(completion) = &completion {
-            super::emoji_completion::keys(ui, id, &mut draft.text, completion.emoji);
+        if let Some(completion) = &completion
+            && let Some(mention) =
+                super::emoji_completion::keys(ui, id, &mut draft.text, completion)
+        {
+            draft.mentions.push(mention);
         }
         super::markup_editor::shortcuts(ui, id, &mut draft.text);
     }
@@ -74,14 +79,16 @@ pub fn composer(
                         ui,
                         output.response.dragged_by(egui::PointerButton::Primary),
                     );
-                    if let Some(completion) = &mut completion {
-                        super::emoji_completion::popup(
+                    if let Some(completion) = &mut completion
+                        && let Some(mention) = super::emoji_completion::popup(
                             ui,
                             &output,
                             id,
                             &mut draft.text,
                             completion,
-                        );
+                        )
+                    {
+                        draft.mentions.push(mention);
                     }
                 });
             draft.attachments.show(ui);
@@ -316,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn typing_a_colon_suggests_custom_emoji_and_enter_inserts_instead_of_sending() {
+    fn typing_a_colon_or_at_suggests_and_enter_inserts_instead_of_sending() {
         use crate::application::chat_service::ChatService;
         use crate::application::emoji_catalog::EmojiCatalog;
         use crate::infrastructure::demo::DemoGateway;
@@ -335,6 +342,13 @@ mod tests {
             thread_ts: None,
         };
         let mut draft = Draft::default();
+        let people = [crate::domain::people::Person {
+            id: "U1".into(),
+            name: "Axel Wennström".into(),
+            real_name: "Axel Wennström".into(),
+            handle: "axel".into(),
+            avatar_url: None,
+        }];
         ctx.memory_mut(|memory| memory.request_focus(target.editor_id()));
         let mut sent = false;
         let mut frame = |events: Vec<egui::Event>| {
@@ -352,6 +366,8 @@ mod tests {
                     ui.add_space(250.0);
                     let completion = crate::ui::emoji_completion::EmojiCompletion {
                         emoji: &emoji,
+                        people: &people,
+                        preferred: &[],
                         images: &mut images,
                     };
                     sent |= composer(ui, &target, &mut draft, "Message", Some(completion));
@@ -362,7 +378,7 @@ mod tests {
                 matches!(&clipped.shape,
                     egui::Shape::Text(text) if text.galley.text() == ":partyparrot:")
             });
-            (shown, draft.text.clone(), sent)
+            (shown, draft.text.clone(), sent, draft.mentions.clone())
         };
         let enter = |pressed| egui::Event::Key {
             key: egui::Key::Enter,
@@ -375,10 +391,21 @@ mod tests {
         frame(vec![egui::Event::Text("hi :partyp".into())]);
         assert!(frame(vec![]).0, "the custom emoji is suggested");
         frame(vec![enter(true), enter(false)]);
-        let (shown, text, sent_now) = frame(vec![]);
+        let (shown, text, sent_now, _) = frame(vec![]);
         assert_eq!(text, "hi :partyparrot: ");
         assert!(!sent_now, "Enter picked the emoji instead of sending");
         assert!(!shown, "the list closes after inserting");
+        frame(vec![egui::Event::Text("@ax".into())]);
+        frame(vec![]);
+        frame(vec![enter(true), enter(false)]);
+        let (_, text, sent_now, mentions) = frame(vec![]);
+        assert_eq!(text, "hi :partyparrot: @Axel Wennström ");
+        assert!(!sent_now, "Enter picked the person instead of sending");
+        assert_eq!(
+            crate::domain::message_text::link_mentions(&text, &mentions),
+            "hi :partyparrot: <@U1> ",
+            "the name is sent as a mention"
+        );
         assert!(
             frame(vec![enter(true), enter(false)]).2,
             "the next Enter sends"

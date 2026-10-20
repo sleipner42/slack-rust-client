@@ -6,6 +6,7 @@ pub mod message_search;
 pub mod message_text;
 pub mod model;
 pub mod notify;
+pub mod people;
 pub mod search;
 pub mod sidebar;
 pub mod spelling;

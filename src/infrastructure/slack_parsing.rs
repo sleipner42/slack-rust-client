@@ -7,6 +7,7 @@ use crate::domain::model::{
     Reaction, ReadState, RemoteDraft, SavedTodo, SavedTodoPage, SectionKind, SharedMessage,
     SidebarSection, SlackError, UserProfile,
 };
+use crate::domain::people::Person;
 
 pub fn parse_saved_todos(body: &Value, completed: bool) -> Result<SavedTodoPage, SlackError> {
     let items = body["saved_items"]
@@ -393,6 +394,26 @@ pub fn parse_user_profile(user: &Value, user_id: &str) -> UserProfile {
             .find_map(|key| user["profile"][*key].as_str())
             .map(str::to_string),
     }
+}
+
+/// Someone from `users.list`; `None` for deactivated accounts.
+pub fn parse_person(user: &Value) -> Option<Person> {
+    if user["deleted"].as_bool() == Some(true) {
+        return None;
+    }
+    let id = user["id"].as_str()?;
+    let profile = parse_user_profile(user, id);
+    Some(Person {
+        id: id.to_owned(),
+        name: profile.name,
+        real_name: user["real_name"]
+            .as_str()
+            .or(user["profile"]["real_name"].as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        handle: user["name"].as_str().unwrap_or_default().to_owned(),
+        avatar_url: profile.avatar_url,
+    })
 }
 
 pub fn order_sections(raw: &[Value]) -> Vec<&Value> {

@@ -380,6 +380,21 @@ impl SlackGateway for DemoGateway {
             total,
         })
     }
+    fn list_people(&self) -> Result<Vec<crate::domain::people::Person>, SlackError> {
+        Ok(["U1", "U2"]
+            .into_iter()
+            .map(|id| {
+                let profile = self.user_profile(id).unwrap();
+                crate::domain::people::Person {
+                    id: profile.id,
+                    real_name: profile.name.clone(),
+                    handle: profile.name.to_lowercase().replace(' ', "."),
+                    name: profile.name,
+                    avatar_url: profile.avatar_url,
+                }
+            })
+            .collect())
+    }
     fn user_profile(&self, user_id: &str) -> Result<UserProfile, SlackError> {
         let name = match user_id {
             "U1" => "Alex Morgan",
