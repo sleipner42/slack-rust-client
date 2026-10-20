@@ -57,6 +57,8 @@ info = {
     'CFBundleVersion': '1',
     'LSMinimumSystemVersion': '11.0',
     'NSHighResolutionCapable': True,
+    # Without this, macOS denies the microphone that huddles need.
+    'NSMicrophoneUsageDescription': 'Better Slack uses the microphone when you talk in a huddle.',
 }
 with (app / 'Contents/Info.plist').open('wb') as file:
     plistlib.dump(info, file)

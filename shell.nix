@@ -17,12 +17,14 @@ pkgs.mkShell {
   nativeBuildInputs = with pkgs; [
     cargo
     clippy
+    cmake
     pkg-config
     rustc
     rustfmt
   ];
 
   buildInputs = with pkgs; [
+    alsa-lib
     dbus
     glib-networking
     gtk3

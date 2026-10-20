@@ -18,3 +18,9 @@ and Swedish (`sv_SE`, DSSO 2.40) by Göran Andersson under the
 [GNU LGPL 3.0](https://www.gnu.org/licenses/lgpl-3.0.html), see
 [assets/dictionaries/sv_SE-README.txt](assets/dictionaries/sv_SE-README.txt).
 Both notices are also included in the macOS app bundle under Resources/Licenses.
+
+Huddle audio is encoded with the [Opus codec](https://opus-codec.org), built
+from source and linked into the binary, under its
+[BSD 3-Clause licence](https://opus-codec.org/license/). The Chime signaling
+messages follow `SignalingProtocol.proto` from
+[amazon-chime-sdk-js](https://github.com/aws/amazon-chime-sdk-js) (Apache 2.0).

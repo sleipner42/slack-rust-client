@@ -120,9 +120,17 @@ pub struct Huddle {
     pub ended_at: i64,
 }
 
-/// Where Slack's web client opens (or starts) a conversation's huddle.
-pub fn huddle_link(team_id: &str, conversation_id: &str) -> String {
-    format!("https://app.slack.com/huddle/{team_id}/{conversation_id}")
+/// What it takes to join a huddle's audio: Slack hands these out when you
+/// start, join or are invited to a huddle.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChimeJoin {
+    /// Slack's ID for the call (`R…`).
+    pub call_id: String,
+    pub conversation_id: String,
+    pub attendee_id: String,
+    pub join_token: String,
+    pub signaling_url: String,
+    pub audio_host_url: String,
 }
 
 impl Huddle {
@@ -238,7 +246,8 @@ pub enum LiveEvent {
     HuddleRinging {
         conversation_id: String,
         caller_id: String,
-        link: String,
+        /// Slack's ID for the call (`R…`).
+        call_id: String,
     },
     /// The call stopped ringing: the caller hung up, or the user answered or
     /// declined somewhere else.

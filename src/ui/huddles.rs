@@ -1,5 +1,5 @@
-//! Huddles: who is in one where, the incoming-call banner, and the huddle
-//! card in conversations. The call itself runs in Slack's web client.
+//! Huddles: who is in one where, the incoming-call banner, the call bar
+//! while in one, and the huddle card in conversations.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use super::{images::ImageCache, theme};
-use crate::domain::model::Huddle;
+use crate::domain::model::{ChimeJoin, Huddle};
 use crate::infrastructure::calls::Ringtone;
+use crate::infrastructure::huddle_call::{Call, CallUpdate};
 
 /// A huddle with the names of the people in it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -24,7 +25,8 @@ pub struct Ringing {
     pub caller_id: String,
     pub caller: String,
     pub avatar_url: Option<String>,
-    pub link: String,
+    /// Slack's call ID, for declining.
+    pub call_id: String,
     since: Instant,
 }
 
@@ -34,12 +36,34 @@ pub enum CallChoice {
     Decline,
 }
 
+/// The huddle the user is in, from asking Slack to join until leaving.
+pub struct ActiveCall {
+    pub conversation_id: String,
+    /// What the conversation is called, for the call bar.
+    pub title: String,
+    /// Slack's answer to joining; `None` while waiting for it.
+    pub join: Option<ChimeJoin>,
+    call: Option<Call>,
+    /// When audio started flowing.
+    pub connected: Option<Instant>,
+    pub muted: bool,
+    /// Slack user IDs of those talking.
+    pub speaking: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CallAction {
+    ToggleMute,
+    Leave,
+}
+
 #[derive(Default)]
 pub struct Huddles {
     /// The latest huddle per conversation, ended ones included.
     known: HashMap<String, LiveHuddle>,
     ringing: Option<Ringing>,
     ringtone: Ringtone,
+    call: Option<ActiveCall>,
 }
 
 impl Huddles {
@@ -97,16 +121,97 @@ impl Huddles {
         self.ringing.as_ref()
     }
 
-    pub fn ring(&mut self, conversation_id: String, caller_id: String, link: String) {
+    pub fn ring(&mut self, conversation_id: String, caller_id: String, call_id: String) {
         self.ringing = Some(Ringing {
             conversation_id,
             caller: caller_id.clone(),
             caller_id,
             avatar_url: None,
-            link,
+            call_id,
             since: Instant::now(),
         });
         self.ringtone.stop();
+    }
+
+    pub fn call(&self) -> Option<&ActiveCall> {
+        self.call.as_ref()
+    }
+
+    /// Whether the user is in (or joining) this conversation's huddle.
+    pub fn in_call(&self, conversation_id: &str) -> bool {
+        self.call
+            .as_ref()
+            .is_some_and(|call| call.conversation_id == conversation_id)
+    }
+
+    /// Asking Slack to join; returns the call this replaces, to leave.
+    pub fn joining(&mut self, conversation_id: String, title: String) -> Option<ActiveCall> {
+        self.call.replace(ActiveCall {
+            conversation_id,
+            title,
+            join: None,
+            call: None,
+            connected: None,
+            muted: false,
+            speaking: Vec::new(),
+        })
+    }
+
+    /// Slack said how to join. Returns false when the user has moved on, and
+    /// the call should be left again.
+    pub fn joined(&mut self, join: &ChimeJoin) -> bool {
+        match &mut self.call {
+            Some(call) if call.join.is_none() && call.conversation_id == join.conversation_id => {
+                call.join = Some(join.clone());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The audio is starting; it belongs to the call just joined.
+    pub fn started(&mut self, audio: Call) {
+        match &mut self.call {
+            Some(call) => {
+                audio.set_muted(call.muted);
+                call.call = Some(audio);
+            }
+            None => audio.leave(),
+        }
+    }
+
+    /// News from the call with this Slack call ID. Returns the call when it
+    /// ended, so Slack can be told.
+    pub fn call_update(&mut self, call_id: &str, update: CallUpdate) -> Option<ActiveCall> {
+        let call = self.call.as_mut().filter(|call| {
+            call.join
+                .as_ref()
+                .is_some_and(|join| join.call_id == call_id)
+        })?;
+        match update {
+            CallUpdate::Connected => call.connected = Some(Instant::now()),
+            CallUpdate::Speaking(speaking) => call.speaking = speaking,
+            CallUpdate::Ended(_) => return self.call.take(),
+        }
+        None
+    }
+
+    /// Leave the huddle; returns the call so Slack can be told.
+    pub fn leave(&mut self) -> Option<ActiveCall> {
+        let call = self.call.take()?;
+        if let Some(audio) = &call.call {
+            audio.leave();
+        }
+        Some(call)
+    }
+
+    pub fn toggle_mute(&mut self) {
+        if let Some(call) = &mut self.call {
+            call.muted = !call.muted;
+            if let Some(audio) = &call.call {
+                audio.set_muted(call.muted);
+            }
+        }
     }
 
     pub fn caller_found(&mut self, caller_id: &str, name: String, avatar_url: Option<String>) {
@@ -139,6 +244,10 @@ impl Huddles {
 
     /// Keep the ringtone going; give up after Slack would have.
     pub fn tick(&mut self) -> Option<Duration> {
+        if self.ringing.is_none() && self.call.is_some() {
+            // The call bar's clock.
+            return Some(Duration::from_secs(1));
+        }
         let since = self.ringing.as_ref()?.since;
         if since.elapsed() >= RING_LIMIT {
             self.stop_ringing();
@@ -180,7 +289,7 @@ impl Huddles {
                                 |ui| {
                                     if ui
                                         .add(egui::Button::new("Decline"))
-                                        .on_hover_text("Stop ringing")
+                                        .on_hover_text("Let them know you can't talk now")
                                         .clicked()
                                     {
                                         choice = Some(CallChoice::Decline);
@@ -193,7 +302,7 @@ impl Huddles {
                                             )
                                             .fill(ANSWER),
                                         )
-                                        .on_hover_text("Join in a browser window")
+                                        .on_hover_text("Join the huddle")
                                         .clicked()
                                     {
                                         choice = Some(CallChoice::Answer);
@@ -207,19 +316,115 @@ impl Huddles {
     }
 }
 
+/// The call bar at the bottom of the sidebar while in a huddle. `names`
+/// gives names for user IDs where known.
+pub fn call_bar(
+    ui: &mut egui::Ui,
+    call: &ActiveCall,
+    names: &HashMap<String, String>,
+) -> Option<CallAction> {
+    let mut action = None;
+    egui::Frame::new()
+        .fill(theme::SURFACE)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+                let color = if call.connected.is_some() {
+                    ANSWER_LIGHT
+                } else {
+                    theme::TEXT_MUTED
+                };
+                paint_headphones(ui, rect, color);
+                ui.vertical(|ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&call.title)
+                                .strong()
+                                .color(theme::TEXT_STRONG),
+                        )
+                        .truncate(),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(call_status(call, names)).small().weak(),
+                        )
+                        .truncate(),
+                    );
+                });
+            });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let mute = if call.muted { "Unmute" } else { "Mute" };
+                let button = egui::Button::new(mute);
+                let button = if call.muted {
+                    button.fill(theme::SELF_MENTION_BACKGROUND)
+                } else {
+                    button
+                };
+                if ui
+                    .add(button)
+                    .on_hover_text(if call.muted {
+                        "Others cannot hear you"
+                    } else {
+                        "Turn your microphone off"
+                    })
+                    .clicked()
+                {
+                    action = Some(CallAction::ToggleMute);
+                }
+                if ui
+                    .add(
+                        egui::Button::new(egui::RichText::new("Leave").color(egui::Color32::WHITE))
+                            .fill(LEAVE),
+                    )
+                    .on_hover_text("Leave the huddle")
+                    .clicked()
+                {
+                    action = Some(CallAction::Leave);
+                }
+            });
+        });
+    action
+}
+
+fn call_status(call: &ActiveCall, names: &HashMap<String, String>) -> String {
+    let Some(connected) = call.connected else {
+        return "Connecting…".into();
+    };
+    let talking: Vec<&str> = call
+        .speaking
+        .iter()
+        .filter_map(|id| names.get(id).map(String::as_str))
+        .collect();
+    let seconds = connected.elapsed().as_secs();
+    let clock = format!("{}:{:02}", seconds / 60, seconds % 60);
+    match talking.as_slice() {
+        [] => clock,
+        [one] => format!("{clock} · {one} is talking"),
+        many => format!("{clock} · {} are talking", many.join(", ")),
+    }
+}
+
 /// Slack rings for about half a minute; this is a fallback if the stop is lost.
 const RING_LIMIT: Duration = Duration::from_secs(60);
 const ANSWER: egui::Color32 = egui::Color32::from_rgb(0, 122, 90);
+const LEAVE: egui::Color32 = egui::Color32::from_rgb(196, 43, 28);
 
 /// A huddle in the conversation: who is in it and a Join button, or how long
-/// it lasted. Returns the link to open when Join is clicked.
+/// it lasted. Returns true when Join is clicked.
 pub fn huddle_card(
     ui: &mut egui::Ui,
     snapshot: &Huddle,
     live: Option<&LiveHuddle>,
-) -> Option<String> {
+    in_call: bool,
+) -> bool {
     let huddle = live.map_or(snapshot, |live| &live.huddle);
-    let mut join = None;
+    let mut join = false;
     egui::Frame::new()
         .fill(theme::SURFACE)
         .stroke(egui::Stroke::new(1.0, theme::BORDER))
@@ -248,16 +453,10 @@ pub fn huddle_card(
                     );
                     ui.add(egui::Label::new(egui::RichText::new(detail).small().weak()).truncate());
                 });
-                if huddle.is_live()
-                    && let Some(link) = &huddle.link
-                {
+                if huddle.is_live() && !in_call {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .button("Join")
-                            .on_hover_text("Join in a browser window")
-                            .clicked()
-                        {
-                            join = Some(link.clone());
+                        if ui.button("Join").on_hover_text("Join the huddle").clicked() {
+                            join = true;
                         }
                     });
                 }
@@ -350,7 +549,7 @@ mod tests {
     #[test]
     fn ringing_stops_when_answered_elsewhere_or_the_huddle_ends() {
         let mut huddles = Huddles::default();
-        huddles.ring("D1".into(), "U1".into(), "link".into());
+        huddles.ring("D1".into(), "U1".into(), "R1".into());
         assert!(
             huddles.update(huddle(&["U1"], false), "ME"),
             "names to look up"
@@ -362,7 +561,7 @@ mod tests {
         huddles.update(huddle(&["U1", "ME"], false), "ME");
         assert!(huddles.ringing().is_none(), "answered on another device");
 
-        huddles.ring("D1".into(), "U1".into(), "link".into());
+        huddles.ring("D1".into(), "U1".into(), "R1".into());
         assert!(
             huddles.stop_ringing_in(Some("D2")).is_none(),
             "another conversation"

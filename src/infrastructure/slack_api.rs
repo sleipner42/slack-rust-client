@@ -10,13 +10,13 @@ use serde_json::Value;
 
 use crate::domain::gateway::SlackGateway;
 use crate::domain::model::{
-    Attachment, Author, Conversation, Credentials, Message, ReadState, RemoteDraft, SavedMessage,
-    SavedTodo, SavedTodoPage, SidebarSection, SlackError, UserProfile,
+    Attachment, Author, ChimeJoin, Conversation, Credentials, Message, ReadState, RemoteDraft,
+    SavedMessage, SavedTodo, SavedTodoPage, SidebarSection, SlackError, UserProfile,
 };
 use crate::infrastructure::slack_parsing::{
-    next_cursor, order_sections, parse_attachment, parse_conversations, parse_custom_emoji,
-    parse_draft, parse_message, parse_muted, parse_read_states, parse_saved_todos, parse_search,
-    parse_section, parse_user_profile,
+    next_cursor, order_sections, parse_attachment, parse_chime_join, parse_conversations,
+    parse_custom_emoji, parse_draft, parse_message, parse_muted, parse_read_states,
+    parse_saved_todos, parse_search, parse_section, parse_user_profile,
 };
 
 pub struct SlackHttpGateway {
@@ -24,7 +24,6 @@ pub struct SlackHttpGateway {
     credentials: Credentials,
     file_previews: Mutex<HashMap<String, (Instant, Option<Attachment>)>>,
     bot_profiles: Mutex<HashMap<String, UserProfile>>,
-    team_id: Mutex<Option<String>>,
 }
 
 impl SlackHttpGateway {
@@ -38,7 +37,6 @@ impl SlackHttpGateway {
             credentials,
             file_previews: Mutex::new(HashMap::new()),
             bot_profiles: Mutex::new(HashMap::new()),
-            team_id: Mutex::new(None),
         }
     }
 
@@ -507,9 +505,6 @@ impl SlackGateway for SlackHttpGateway {
 
     fn current_user_id(&self) -> Result<String, SlackError> {
         let body = self.call("auth.test", &[])?;
-        if let Some(team) = body["team_id"].as_str() {
-            *self.team_id.lock().unwrap() = Some(team.to_owned());
-        }
         body["user_id"]
             .as_str()
             .map(str::to_string)
@@ -764,8 +759,41 @@ impl SlackGateway for SlackHttpGateway {
             .ok_or_else(|| SlackError("Slack returned no link for this message.".into()))
     }
 
-    fn team_id(&self) -> Option<String> {
-        self.team_id.lock().unwrap().clone()
+    fn join_huddle(&self, conversation_id: &str) -> Result<ChimeJoin, SlackError> {
+        let body = self.call(
+            "rooms.join",
+            &[
+                ("channel_id", conversation_id),
+                ("regions", ""),
+                ("multidevice", "false"),
+            ],
+        )?;
+        parse_chime_join(&body, conversation_id)
+            .ok_or_else(|| SlackError(String::from("Slack sent no way to join the huddle")))
+    }
+
+    fn leave_huddle(&self, join: &ChimeJoin) -> Result<(), SlackError> {
+        self.call(
+            "rooms.leave",
+            &[
+                ("channel_id", &join.conversation_id),
+                ("call_id", &join.call_id),
+                ("attendee_id", &join.attendee_id),
+            ],
+        )
+        .map(|_| ())
+    }
+
+    fn decline_huddle(&self, conversation_id: &str, call_id: &str) -> Result<(), SlackError> {
+        self.call(
+            "rooms.inviteResponse",
+            &[
+                ("response", "decline"),
+                ("channel_id", conversation_id),
+                ("room_id", call_id),
+            ],
+        )
+        .map(|_| ())
     }
 
     fn search_messages(

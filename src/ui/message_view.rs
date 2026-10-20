@@ -25,7 +25,7 @@ pub enum MessageAction {
     SaveEdit,
     CancelEdit,
     Share(String),
-    /// Join a huddle by its link.
+    /// Join the huddle in this conversation.
     JoinHuddle(String),
     /// Open a shared message where it was posted: the thread it starts or belongs to.
     OpenShare {
@@ -68,6 +68,8 @@ pub struct MessageContext<'a> {
     pub edit: Option<&'a mut MessageEdit>,
     /// Live huddle state per conversation, fresher than a message's snapshot.
     pub huddles: &'a std::collections::HashMap<String, super::huddles::LiveHuddle>,
+    /// The conversation whose huddle the user is in.
+    pub huddle_call: Option<&'a str>,
 }
 
 #[derive(Clone, Default)]
@@ -358,8 +360,11 @@ fn message_row(
                                 .huddles
                                 .get(&huddle.conversation_id)
                                 .filter(|live| live.huddle.id == huddle.id);
-                            if let Some(link) = super::huddles::huddle_card(ui, huddle, live) {
-                                action = Some(MessageAction::JoinHuddle(link));
+                            let in_call =
+                                context.huddle_call == Some(huddle.conversation_id.as_str());
+                            if super::huddles::huddle_card(ui, huddle, live, in_call) {
+                                action =
+                                    Some(MessageAction::JoinHuddle(huddle.conversation_id.clone()));
                             }
                         }
                         None => {
@@ -1428,6 +1433,7 @@ mod tests {
                             messages,
                             &mut MessageContext {
                                 huddles: &Default::default(),
+                                huddle_call: None,
                                 emoji: &emoji,
                                 images: &mut images,
                                 self_user_id: "me",
@@ -1651,6 +1657,7 @@ mod tests {
                                 &messages,
                                 &mut MessageContext {
                                     huddles: &Default::default(),
+                                    huddle_call: None,
                                     emoji: &workspace.emoji,
                                     images: &mut images,
                                     self_user_id: "me",
@@ -1754,6 +1761,7 @@ mod tests {
                         std::slice::from_ref(&message),
                         &mut MessageContext {
                             huddles: &Default::default(),
+                            huddle_call: None,
                             emoji: &workspace.emoji,
                             images: &mut images,
                             self_user_id: "me",
@@ -1838,6 +1846,7 @@ mod tests {
                         std::slice::from_ref(&message),
                         &mut MessageContext {
                             huddles: &Default::default(),
+                            huddle_call: None,
                             emoji: &workspace.emoji,
                             images: &mut images,
                             self_user_id: "me",
@@ -1947,6 +1956,7 @@ mod tests {
                         std::slice::from_ref(&message),
                         &mut MessageContext {
                             huddles: &Default::default(),
+                            huddle_call: None,
                             emoji: &workspace.emoji,
                             images: &mut images,
                             self_user_id: "me",
@@ -2033,6 +2043,7 @@ mod tests {
                         messages,
                         &mut MessageContext {
                             huddles: &Default::default(),
+                            huddle_call: None,
                             emoji: &workspace.emoji,
                             images: &mut images,
                             self_user_id: "me",
@@ -2127,6 +2138,7 @@ mod tests {
                                 &messages,
                                 &mut MessageContext {
                                     huddles: &Default::default(),
+                                    huddle_call: None,
                                     emoji: &workspace.emoji,
                                     images: &mut images,
                                     self_user_id: "me",
@@ -2188,6 +2200,7 @@ mod tests {
                             &messages,
                             &mut MessageContext {
                                 huddles: &Default::default(),
+                                huddle_call: None,
                                 emoji: &workspace.emoji,
                                 images: &mut images,
                                 self_user_id: "me",

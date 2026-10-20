@@ -13,15 +13,17 @@ egui and wgpu. Inspired by old IRC clients: readable, restrained, and fast.
 
 ## Run
 
-Requires a recent stable Rust toolchain and Xcode Command Line Tools on macOS.
+Requires a recent stable Rust toolchain and CMake (which builds the Opus audio
+codec for huddles), plus Xcode Command Line Tools on macOS (`brew install cmake`
+for CMake).
 
 ```sh
 cargo run --release --locked
 ```
 
-On Linux, install `pkg-config` and the development packages for D-Bus, GTK 3,
-WebKitGTK 4.1, and libsoup 3 (e.g. `libdbus-1-dev libgtk-3-dev
-libwebkit2gtk-4.1-dev libsoup-3.0-dev` on Debian/Ubuntu). On NixOS, run the
+On Linux, install `pkg-config` and the development packages for ALSA, D-Bus,
+GTK 3, WebKitGTK 4.1, and libsoup 3 (e.g. `libasound2-dev libdbus-1-dev
+libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev` on Debian/Ubuntu). On NixOS, run the
 commands inside `nix-shell`. Ctrl replaces Cmd in shortcuts.
 
 Uses your existing local Slack desktop session or opens Slack sign-in. On

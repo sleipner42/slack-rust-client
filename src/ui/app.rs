@@ -190,6 +190,10 @@ enum UiEvent {
     CallerFound(crate::domain::model::UserProfile),
     /// Answer or Decline chosen in the call notification.
     CallChosen(String, CallChoice),
+    /// Slack's answer to joining a conversation's huddle.
+    HuddleJoined(String, Result<crate::domain::model::ChimeJoin, SlackError>),
+    /// News from the call with this Slack call ID.
+    CallUpdated(String, crate::infrastructure::huddle_call::CallUpdate),
 }
 
 impl eframe::App for ChatApp {
@@ -498,6 +502,31 @@ impl ChatApp {
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
+        if let Some(call) = self.huddles.call() {
+            let names: HashMap<String, String> = self
+                .huddles
+                .live(&call.conversation_id)
+                .filter(|live| live.names.len() == live.huddle.participants.len())
+                .map(|live| {
+                    live.huddle
+                        .participants
+                        .iter()
+                        .cloned()
+                        .zip(live.names.iter().cloned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let action = egui::Panel::bottom("huddle_call_bar")
+                .frame(egui::Frame::new().inner_margin(egui::Margin {
+                    top: 8,
+                    ..Default::default()
+                }))
+                .show(ui, |ui| crate::ui::huddles::call_bar(ui, call, &names))
+                .inner;
+            if let Some(action) = action {
+                self.call_action(action);
+            }
+        }
         ui.heading(&self.team_name);
         ui.add_space(8.0);
         if ui
@@ -874,8 +903,10 @@ impl ChatApp {
                             ui.label(egui::RichText::new("Live").small().weak());
                         }
                         let live = self.huddles.live(&conversation.id);
+                        let in_call = self.huddles.in_call(&conversation.id);
                         let headphones = ui.make_persistent_id("huddle_headphones");
                         let label = match live {
+                            _ if in_call => "In huddle".into(),
                             Some(live) => {
                                 format!("Join huddle · {}", live.huddle.participants.len())
                             }
@@ -885,7 +916,7 @@ impl ChatApp {
                             egui::Atom::custom(headphones, egui::vec2(16.0, 16.0)),
                             label,
                         ));
-                        let output = if live.is_some() {
+                        let output = if live.is_some() && !in_call {
                             button.fill(theme::ACCENT)
                         } else {
                             button
@@ -895,14 +926,22 @@ impl ChatApp {
                             crate::ui::huddles::paint_headphones(ui, rect, theme::TEXT);
                         }
                         let hover = match live {
+                            _ if in_call => "You are in this huddle".into(),
                             Some(live) if live.names.len() == live.huddle.participants.len() => {
                                 format!("In the huddle: {}", live.names.join(", "))
                             }
-                            Some(_) => "Join the huddle in a browser window".into(),
-                            None => "Start a huddle in a browser window".into(),
+                            Some(_) => "Join the huddle".into(),
+                            None if matches!(
+                                conversation.kind,
+                                crate::domain::model::ConversationKind::DirectMessage { .. }
+                            ) =>
+                            {
+                                "Start a huddle and call them".into()
+                            }
+                            None => "Start a huddle".into(),
                         };
-                        if output.response.on_hover_text(hover).clicked() {
-                            self.open_conversation_huddle(&conversation.id);
+                        if output.response.on_hover_text(hover).clicked() && !in_call {
+                            self.join_huddle(&conversation.id);
                         }
                     });
                 });
@@ -962,6 +1001,10 @@ impl ChatApp {
                                 &self.outbox.messages(&target, &self.messages),
                                 &mut MessageContext {
                                     huddles: self.huddles.known(),
+                                    huddle_call: self
+                                        .huddles
+                                        .call()
+                                        .map(|call| call.conversation_id.as_str()),
                                     emoji: &workspace.emoji,
                                     images: &mut self.images,
                                     self_user_id: &workspace.self_user_id,
@@ -1163,6 +1206,10 @@ impl ChatApp {
                             &self.outbox.messages(&target, &thread.messages),
                             &mut MessageContext {
                                 huddles: self.huddles.known(),
+                                huddle_call: self
+                                    .huddles
+                                    .call()
+                                    .map(|call| call.conversation_id.as_str()),
                                 emoji: &workspace.emoji,
                                 images: &mut self.images,
                                 self_user_id: &workspace.self_user_id,
@@ -1429,7 +1476,7 @@ impl ChatApp {
                 self.picker = None;
                 self.share = Some(ShareDialog::new(conversation_id, ts));
             }
-            MessageAction::JoinHuddle(link) => crate::infrastructure::calls::open_huddle(&link),
+            MessageAction::JoinHuddle(conversation_id) => self.join_huddle(&conversation_id),
             MessageAction::OpenShare {
                 conversation_id,
                 ts,
@@ -2005,6 +2052,10 @@ impl ChatApp {
                         self.call_choice(choice);
                     }
                 }
+                UiEvent::HuddleJoined(conversation_id, result) => {
+                    self.huddle_joined(conversation_id, result)
+                }
+                UiEvent::CallUpdated(call_id, update) => self.call_updated(&call_id, update),
             }
         }
     }
@@ -2133,8 +2184,8 @@ impl ChatApp {
             LiveEvent::HuddleRinging {
                 conversation_id,
                 caller_id,
-                link,
-            } => self.ring(conversation_id, caller_id, link),
+                call_id,
+            } => self.ring(conversation_id, caller_id, call_id),
             LiveEvent::HuddleRingStopped { conversation_id } => {
                 self.huddles.stop_ringing_in(Some(&conversation_id));
             }
@@ -2467,7 +2518,7 @@ impl ChatApp {
     }
 
     /// Someone is calling: ring here, and offer Answer in a notification.
-    fn ring(&mut self, conversation_id: String, caller_id: String, link: String) {
+    fn ring(&mut self, conversation_id: String, caller_id: String, call_id: String) {
         let Some(workspace) = &self.workspace else {
             return;
         };
@@ -2475,7 +2526,7 @@ impl ChatApp {
             return;
         }
         self.huddles
-            .ring(conversation_id.clone(), caller_id.clone(), link);
+            .ring(conversation_id.clone(), caller_id.clone(), call_id);
         self.ctx
             .send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                 egui::UserAttentionType::Critical,
@@ -2505,21 +2556,116 @@ impl ChatApp {
         let Some(ringing) = self.huddles.stop_ringing_in(None) else {
             return;
         };
-        if choice == CallChoice::Answer {
-            crate::infrastructure::calls::open_huddle(&ringing.link);
+        match choice {
+            CallChoice::Answer => self.join_huddle(&ringing.conversation_id),
+            CallChoice::Decline => {
+                let (service, conversation_id, call_id) = (
+                    Arc::clone(&self.service),
+                    ringing.conversation_id,
+                    ringing.call_id,
+                );
+                thread::spawn(move || {
+                    let _ = service.decline_huddle(&conversation_id, &call_id);
+                });
+            }
         }
     }
 
-    /// Join the huddle going on in a conversation, or start one.
-    fn open_conversation_huddle(&mut self, conversation_id: &str) {
-        let link = self
-            .huddles
-            .live(conversation_id)
-            .and_then(|live| live.huddle.link.clone())
-            .or_else(|| self.service.huddle_link(conversation_id));
-        match link {
-            Some(link) => crate::infrastructure::calls::open_huddle(&link),
-            None => self.status = Some("Huddles are not available yet; try again shortly.".into()),
+    /// Join the huddle going on in a conversation, or start one, leaving any
+    /// other huddle.
+    fn join_huddle(&mut self, conversation_id: &str) {
+        if self.huddles.in_call(conversation_id) {
+            return;
+        }
+        self.huddles.stop_ringing_in(Some(conversation_id));
+        let title = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| {
+                workspace
+                    .conversations
+                    .iter()
+                    .find(|conversation| conversation.id == conversation_id)
+            })
+            .map_or_else(|| String::from("Huddle"), conversation_label);
+        if let Some(previous) = self.huddles.joining(conversation_id.to_owned(), title) {
+            self.left_huddle(previous);
+        }
+        let conversation_id = conversation_id.to_owned();
+        self.spawn(move |service| {
+            let result = service.join_huddle(&conversation_id);
+            UiEvent::HuddleJoined(conversation_id, result)
+        });
+    }
+
+    fn huddle_joined(
+        &mut self,
+        conversation_id: String,
+        result: Result<crate::domain::model::ChimeJoin, SlackError>,
+    ) {
+        let join = match result {
+            Ok(join) => join,
+            Err(error) => {
+                if self.huddles.call().is_some_and(|call| {
+                    call.join.is_none() && call.conversation_id == conversation_id
+                }) {
+                    self.huddles.leave();
+                }
+                self.status = Some(format!("Could not join the huddle: {error}"));
+                return;
+            }
+        };
+        if !self.huddles.joined(&join) {
+            // Left, or went to another huddle, while Slack answered.
+            let service = Arc::clone(&self.service);
+            thread::spawn(move || {
+                let _ = service.leave_huddle(&join);
+            });
+            return;
+        }
+        let (sender, ctx, call_id) = (self.sender.clone(), self.ctx.clone(), join.call_id.clone());
+        let call = crate::infrastructure::huddle_call::Call::start(join, false, move |update| {
+            let _ = sender.send(UiEvent::CallUpdated(call_id.clone(), update));
+            ctx.request_repaint();
+        });
+        self.huddles.started(call);
+    }
+
+    fn call_updated(
+        &mut self,
+        call_id: &str,
+        update: crate::infrastructure::huddle_call::CallUpdate,
+    ) {
+        let error = match &update {
+            crate::infrastructure::huddle_call::CallUpdate::Ended(error) => error.clone(),
+            _ => None,
+        };
+        if let Some(ended) = self.huddles.call_update(call_id, update) {
+            self.left_huddle(ended);
+            if let Some(error) = error {
+                self.status = Some(error);
+            }
+        }
+    }
+
+    fn call_action(&mut self, action: crate::ui::huddles::CallAction) {
+        match action {
+            crate::ui::huddles::CallAction::ToggleMute => self.huddles.toggle_mute(),
+            crate::ui::huddles::CallAction::Leave => {
+                if let Some(call) = self.huddles.leave() {
+                    self.left_huddle(call);
+                }
+            }
+        }
+    }
+
+    /// Tell Slack the user left a huddle.
+    fn left_huddle(&mut self, call: crate::ui::huddles::ActiveCall) {
+        if let Some(join) = call.join {
+            let service = Arc::clone(&self.service);
+            thread::spawn(move || {
+                let _ = service.leave_huddle(&join);
+            });
         }
     }
 
@@ -3189,7 +3335,7 @@ mod tests {
             LiveEvent::HuddleRinging {
                 conversation_id: "D1".into(),
                 caller_id: me.clone(),
-                link: "link".into(),
+                call_id: "R1".into(),
             },
         );
         assert!(app.huddles.ringing().is_none(), "own calls never ring");
@@ -3198,7 +3344,7 @@ mod tests {
             LiveEvent::HuddleRinging {
                 conversation_id: "D1".into(),
                 caller_id: "U1".into(),
-                link: "link".into(),
+                call_id: "R1".into(),
             },
         );
         assert!(app.huddles.ringing().is_some());
@@ -3237,14 +3383,33 @@ mod tests {
             LiveEvent::HuddleRinging {
                 conversation_id: "D2".into(),
                 caller_id: "U2".into(),
-                link: "link".into(),
+                call_id: "R1".into(),
             },
         );
         app.call_choice(CallChoice::Decline);
         assert!(app.huddles.ringing().is_none());
-        assert_eq!(
-            app.service.huddle_link("C1").as_deref(),
-            Some("https://app.slack.com/huddle/TDEMO/C1")
+        assert!(app.huddles.call().is_none(), "declining joins nothing");
+        // Answering joins in the app; this workspace has no huddles, so it says so.
+        live(
+            &mut app,
+            LiveEvent::HuddleRinging {
+                conversation_id: "D2".into(),
+                caller_id: "U2".into(),
+                call_id: "R2".into(),
+            },
+        );
+        app.call_choice(CallChoice::Answer);
+        assert!(app.huddles.ringing().is_none());
+        assert!(app.huddles.in_call("D2"), "joining while Slack answers");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.huddles.call().is_some() && Instant::now() < deadline {
+            app.drain_events();
+        }
+        assert!(app.huddles.call().is_none());
+        assert!(
+            app.status
+                .as_deref()
+                .is_some_and(|status| status.contains("huddle"))
         );
     }
 

@@ -122,9 +122,19 @@ pub trait SlackGateway: Send + Sync {
     fn delete_draft(&self, _id: &str) -> Result<(), SlackError> {
         Ok(())
     }
-    /// The workspace, once `current_user_id` has asked Slack who the user is.
-    fn team_id(&self) -> Option<String> {
-        None
+    /// Join a conversation's huddle, starting one (and in a DM, ringing the
+    /// other person) when there is none.
+    fn join_huddle(&self, _conversation_id: &str) -> Result<super::model::ChimeJoin, SlackError> {
+        Err(SlackError(
+            "Huddles are unavailable for this workspace.".into(),
+        ))
+    }
+    fn leave_huddle(&self, _join: &super::model::ChimeJoin) -> Result<(), SlackError> {
+        Ok(())
+    }
+    /// Tell the caller you will not answer.
+    fn decline_huddle(&self, _conversation_id: &str, _call_id: &str) -> Result<(), SlackError> {
+        Ok(())
     }
     /// One page of messages matching a Slack search query.
     fn search_messages(

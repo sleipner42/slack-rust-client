@@ -7,7 +7,7 @@ use crate::application::emoji_catalog::EmojiCatalog;
 use crate::domain::gateway::SlackGateway;
 use crate::domain::message_text::{Block, EditableText, NameLookup, parse_message_text};
 use crate::domain::model::{
-    Attachment, Author, Conversation, ConversationKind, Message, Reaction, ReadState,
+    Attachment, Author, ChimeJoin, Conversation, ConversationKind, Message, Reaction, ReadState,
     SharedMessage, SidebarSection, SlackError, UserProfile,
 };
 use crate::domain::sidebar::{SidebarGroup, SidebarInput, build_sidebar};
@@ -399,10 +399,17 @@ impl ChatService {
         })
     }
 
-    /// Where Slack's web client opens (or starts) a conversation's huddle.
-    pub fn huddle_link(&self, conversation_id: &str) -> Option<String> {
-        let team = self.gateway.team_id()?;
-        Some(crate::domain::model::huddle_link(&team, conversation_id))
+    /// Join a conversation's huddle, or start one there.
+    pub fn join_huddle(&self, conversation_id: &str) -> Result<ChimeJoin, SlackError> {
+        self.gateway.join_huddle(conversation_id)
+    }
+
+    pub fn leave_huddle(&self, join: &ChimeJoin) -> Result<(), SlackError> {
+        self.gateway.leave_huddle(join)
+    }
+
+    pub fn decline_huddle(&self, conversation_id: &str, call_id: &str) -> Result<(), SlackError> {
+        self.gateway.decline_huddle(conversation_id, call_id)
     }
 
     /// People's names, looking up any not seen yet.

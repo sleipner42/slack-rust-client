@@ -1,64 +1,7 @@
-//! Huddles run in Slack's own web client, in a browser app window; this app
-//! rings and hands the call over.
+//! The ringtone for incoming huddle calls.
 
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-
-/// Open a huddle in a window of its own: Chrome or another Chromium browser in
-/// app mode, which Slack fully supports, else the default browser.
-pub fn open_huddle(link: &str) {
-    if cfg!(test) {
-        return;
-    }
-    let app = format!("--app={link}");
-    #[cfg(target_os = "macos")]
-    {
-        for browser in MAC_BROWSERS {
-            if std::path::Path::new(&format!("/Applications/{browser}.app")).exists()
-                && Command::new("open")
-                    .args(["-na", browser, "--args", &app])
-                    .spawn()
-                    .is_ok()
-            {
-                return;
-            }
-        }
-        let _ = Command::new("open").arg(link).spawn();
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        for browser in LINUX_BROWSERS {
-            if Command::new(browser)
-                .arg(&app)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .is_ok()
-            {
-                return;
-            }
-        }
-        let _ = Command::new("xdg-open").arg(link).spawn();
-    }
-}
-
-#[cfg(target_os = "macos")]
-const MAC_BROWSERS: [&str; 4] = [
-    "Google Chrome",
-    "Chromium",
-    "Brave Browser",
-    "Microsoft Edge",
-];
-#[cfg(not(target_os = "macos"))]
-const LINUX_BROWSERS: [&str; 7] = [
-    "google-chrome-stable",
-    "google-chrome",
-    "chromium",
-    "chromium-browser",
-    "brave-browser",
-    "brave",
-    "microsoft-edge",
-];
 
 /// A ringtone played through the system's sound player, repeated until
 /// stopped.

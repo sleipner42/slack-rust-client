@@ -10,6 +10,7 @@ pub mod downloads;
 pub mod draft_blocks;
 pub mod draft_store;
 pub mod emoji_usage_store;
+pub mod huddle_call;
 pub mod notifications;
 pub mod slack_api;
 pub mod slack_parsing;

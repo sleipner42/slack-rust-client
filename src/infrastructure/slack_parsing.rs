@@ -3,9 +3,9 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 
 use crate::domain::model::{
-    Attachment, Author, Conversation, ConversationKind, Huddle, LiveEvent, Message, Reaction,
-    ReadState, RemoteDraft, SavedTodo, SavedTodoPage, SectionKind, SharedMessage, SidebarSection,
-    SlackError, UserProfile,
+    Attachment, Author, ChimeJoin, Conversation, ConversationKind, Huddle, LiveEvent, Message,
+    Reaction, ReadState, RemoteDraft, SavedTodo, SavedTodoPage, SectionKind, SharedMessage,
+    SidebarSection, SlackError, UserProfile,
 };
 
 pub fn parse_saved_todos(body: &Value, completed: bool) -> Result<SavedTodoPage, SlackError> {
@@ -121,6 +121,33 @@ pub fn parse_huddle(room: &Value, conversation_id: Option<&str>) -> Option<Huddl
     })
 }
 
+/// How to join a huddle's audio, from `rooms.join` (under `call`) or from a
+/// `huddle_invite` event, which both carry Chime's meeting and attendee.
+pub fn parse_chime_join(body: &Value, conversation_id: &str) -> Option<ChimeJoin> {
+    let call = if body["call"].is_object() {
+        &body["call"]
+    } else {
+        body
+    };
+    let chime = &call["free_willy"];
+    let placement = &chime["meeting"]["MediaPlacement"];
+    let attendee = &chime["attendee"];
+    let text = |value: &Value| {
+        value
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
+    Some(ChimeJoin {
+        call_id: text(&call["call_id"]).or_else(|| text(&call["id"]))?,
+        conversation_id: text(&call["channel_id"]).unwrap_or_else(|| conversation_id.to_owned()),
+        attendee_id: text(&attendee["AttendeeId"])?,
+        join_token: text(&attendee["JoinToken"])?,
+        signaling_url: text(&placement["SignalingUrl"])?,
+        audio_host_url: text(&placement["AudioHostUrl"])?,
+    })
+}
+
 pub fn parse_search(body: &Value) -> crate::domain::message_search::SearchPage {
     let messages = &body["messages"];
     let paging = &messages["paging"];
@@ -224,12 +251,9 @@ pub fn parse_live_event(event: &Value) -> Option<LiveEvent> {
         "huddle_invite" => {
             let conversation_id = event["channel_id"].as_str()?.to_owned();
             Some(LiveEvent::HuddleRinging {
-                link: crate::domain::model::huddle_link(
-                    event["team_id"].as_str()?,
-                    &conversation_id,
-                ),
                 conversation_id,
                 caller_id: event["sender_user_id"].as_str()?.to_owned(),
+                call_id: event["call_id"].as_str()?.to_owned(),
             })
         }
         "huddle_invite_cancel" => Some(LiveEvent::HuddleRingStopped {
@@ -984,7 +1008,7 @@ mod todo_tests {
             Some(LiveEvent::HuddleRinging {
                 conversation_id: "D1".into(),
                 caller_id: "U1".into(),
-                link: "https://app.slack.com/huddle/T1/D1".into(),
+                call_id: "R1".into(),
             })
         );
         assert_eq!(
