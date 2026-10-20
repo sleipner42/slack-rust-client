@@ -1112,7 +1112,8 @@ pub(super) fn attachment_view(
             });
         ui.ctx()
             .data_mut(|data| data.insert_temp(slot_id, native_size));
-        let max_size = egui::vec2(ui.available_width().clamp(1.0, 480.0), 280.0);
+        // Slack's 720 px preview fits; wide screenshots stay readable.
+        let max_size = egui::vec2(ui.available_width().clamp(1.0, 720.0), 360.0);
         let scale = (max_size.x / native_size.x)
             .min(max_size.y / native_size.y)
             .min(1.0);

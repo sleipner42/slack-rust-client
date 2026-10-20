@@ -293,7 +293,7 @@ impl eframe::App for ChatApp {
         if let Some(choice) = self.huddles.banner(ui.ctx(), &mut self.images) {
             self.call_choice(choice);
         }
-        if let Some(viewer) = &self.image_viewer {
+        if let Some(viewer) = &mut self.image_viewer {
             let (close, click) = viewer.show(ui.ctx(), &mut self.images);
             let attachment = viewer.attachment().clone();
             if close {
