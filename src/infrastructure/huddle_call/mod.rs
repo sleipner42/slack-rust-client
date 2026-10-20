@@ -248,12 +248,22 @@ async fn run(
 
     let muted = Arc::new(AtomicBool::new(muted));
     let (devices_stop, devices_stopped) = mpsc::channel::<()>();
-    let frames = open_devices(playback, devices_stopped)?;
+    let frames = open_devices(playback.clone(), devices_stopped)?;
     let handle = tokio::runtime::Handle::current();
     let sending = muted.clone();
     std::thread::Builder::new()
         .name(String::from("huddle-microphone"))
-        .spawn(move || send_microphone(frames, microphone, ssrc, payload_type, sending, handle))
+        .spawn(move || {
+            send_microphone(
+                frames,
+                EchoCanceller::new(playback),
+                microphone,
+                ssrc,
+                payload_type,
+                sending,
+                handle,
+            )
+        })
         .map_err(|error| error.to_string())?;
     on_update(CallUpdate::Connected);
 
@@ -543,9 +553,11 @@ fn open_devices(
     result.recv().map_err(|error| error.to_string())?
 }
 
-/// Encode each 20 ms of microphone sound and send it; silence while muted.
+/// Encode each 20 ms of microphone sound, with the call's own sound taken
+/// out of it, and send it; silence while muted.
 fn send_microphone(
     frames: mpsc::Receiver<Vec<f32>>,
+    mut echo: EchoCanceller,
     track: Arc<TrackLocalStaticSample>,
     ssrc: u32,
     payload_type: u8,
@@ -561,7 +573,9 @@ fn send_microphone(
     let _ = encoder.set_dtx(true);
     let silence = vec![0.0; audio::FRAME];
     let mut packet = vec![0; 1500];
-    while let Ok(frame) = frames.recv() {
+    while let Ok(mut frame) = frames.recv() {
+        // Even while muted, so it stays tuned to the room.
+        echo.clean(&mut frame);
         let input = if muted.load(Ordering::SeqCst) {
             &silence
         } else {
@@ -583,6 +597,61 @@ fn send_microphone(
         );
     }
 }
+
+/// WebRTC's audio processing: echo cancellation, which subtracts what the
+/// speakers played from what the microphone heard, plus noise suppression.
+struct EchoCanceller {
+    processing: sonora::AudioProcessing,
+    playback: audio::Playback,
+    played: Vec<f32>,
+    out: Vec<f32>,
+}
+
+impl EchoCanceller {
+    fn new(playback: audio::Playback) -> Self {
+        let stream = sonora::StreamConfig::new(audio::RATE, 1);
+        let processing = sonora::AudioProcessing::builder()
+            .config(sonora::Config {
+                echo_canceller: Some(Default::default()),
+                noise_suppression: Some(Default::default()),
+                high_pass_filter: Some(Default::default()),
+                ..Default::default()
+            })
+            .capture_config(stream)
+            .render_config(stream)
+            .build();
+        Self {
+            processing,
+            playback,
+            played: Vec::new(),
+            out: vec![0.0; TEN_MS],
+        }
+    }
+
+    /// Clean a microphone frame in place, after learning what was played.
+    fn clean(&mut self, frame: &mut [f32]) {
+        self.playback.take_played(&mut self.played);
+        let whole = self.played.len() / TEN_MS * TEN_MS;
+        for chunk in self.played[..whole].as_chunks::<TEN_MS>().0 {
+            let _ = self
+                .processing
+                .process_render_f32(&[chunk], &mut [&mut self.out]);
+        }
+        self.played.drain(..whole);
+        for chunk in frame.as_chunks_mut::<TEN_MS>().0 {
+            if self
+                .processing
+                .process_capture_f32(&[chunk], &mut [&mut self.out])
+                .is_ok()
+            {
+                chunk.copy_from_slice(&self.out);
+            }
+        }
+    }
+}
+
+/// The audio processing works on 10 ms at a time.
+const TEN_MS: usize = audio::RATE as usize / 100;
 
 /// Decode the meeting's sound as it arrives and queue it for the speakers.
 async fn play_track(track: Arc<dyn TrackRemote>, playback: audio::Playback) {
@@ -699,6 +768,44 @@ const SPEAKING: f32 = 0.2;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_echo_of_the_call_is_taken_out_of_the_microphone() {
+        let playback = audio::Playback::default();
+        let mut echo = EchoCanceller::new(playback.clone());
+        // Something from the call: noise in syllable-like bursts.
+        let mut seed: u32 = 1;
+        let far: Vec<f32> = (0..audio::RATE as usize * 8)
+            .map(|index| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let noise = (seed >> 8) as f32 / (1 << 24) as f32 * 2.0 - 1.0;
+                let t = index as f32 / audio::RATE as f32;
+                0.3 * noise * ((t * 4.0 * std::f32::consts::TAU).sin() * 0.4 + 0.6)
+            })
+            .collect();
+        // The room: the speakers' sound reaches the microphone 30 ms later, quieter.
+        let delay = audio::RATE as usize * 30 / 1000;
+        let energy = |samples: &[f32]| samples.iter().map(|sample| sample * sample).sum::<f32>();
+        let (mut heard, mut sent) = (0.0, 0.0);
+        let mut played = vec![0.0; audio::FRAME];
+        for (index, frame) in far.as_chunks::<{ audio::FRAME }>().0.iter().enumerate() {
+            playback.push(frame);
+            playback.pop(&mut played);
+            let start = index * audio::FRAME;
+            let mut microphone: Vec<f32> = (start..start + audio::FRAME)
+                .map(|at| at.checked_sub(delay).map_or(0.0, |at| far[at] * 0.5))
+                .collect();
+            let before = energy(&microphone);
+            echo.clean(&mut microphone);
+            // Judge after the canceller has had four seconds to learn the room.
+            if start >= audio::RATE as usize * 4 {
+                heard += before;
+                sent += energy(&microphone);
+            }
+        }
+        let reduction_db = 10.0 * (heard / sent.max(1e-9)).log10();
+        assert!(reduction_db > 20.0, "only {reduction_db:.1} dB less echo");
+    }
 
     #[test]
     fn speakers_are_the_loud_unmuted_attendees() {

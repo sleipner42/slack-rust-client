@@ -24,3 +24,6 @@ from source and linked into the binary, under its
 [BSD 3-Clause licence](https://opus-codec.org/license/). The Chime signaling
 messages follow `SignalingProtocol.proto` from
 [amazon-chime-sdk-js](https://github.com/aws/amazon-chime-sdk-js) (Apache 2.0).
+Echo cancellation and noise suppression use
+[sonora](https://github.com/dignifiedquire/sonora), a Rust port of WebRTC's
+audio processing, under the BSD 3-Clause licence.

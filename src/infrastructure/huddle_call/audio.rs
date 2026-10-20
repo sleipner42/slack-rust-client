@@ -14,13 +14,17 @@ pub const FRAME: usize = 960;
 /// Playback drops the oldest sound beyond this, so the call never lags far behind.
 const MAX_QUEUED: usize = RATE as usize / 4;
 
-/// Sound waiting to be played, at [`RATE`].
+/// Sound waiting to be played, at [`RATE`], and a copy of what was played
+/// for the echo canceller.
 #[derive(Clone, Default)]
-pub struct Playback(Arc<Mutex<VecDeque<f32>>>);
+pub struct Playback {
+    queue: Arc<Mutex<VecDeque<f32>>>,
+    played: Arc<Mutex<VecDeque<f32>>>,
+}
 
 impl Playback {
     pub fn push(&self, samples: &[f32]) {
-        let Ok(mut queue) = self.0.lock() else {
+        let Ok(mut queue) = self.queue.lock() else {
             return;
         };
         queue.extend(samples);
@@ -30,16 +34,33 @@ impl Playback {
 
     #[cfg(test)]
     fn queued(&self) -> usize {
-        self.0.lock().map(|queue| queue.len()).unwrap_or_default()
+        self.queue
+            .lock()
+            .map(|queue| queue.len())
+            .unwrap_or_default()
     }
 
-    fn pop(&self, out: &mut [f32]) {
-        let Ok(mut queue) = self.0.lock() else {
-            out.fill(0.0);
-            return;
-        };
-        for sample in out {
-            *sample = queue.pop_front().unwrap_or(0.0);
+    /// Move what was played since last time into `out`.
+    pub fn take_played(&self, out: &mut Vec<f32>) {
+        if let Ok(mut played) = self.played.lock() {
+            out.extend(played.drain(..));
+        }
+    }
+
+    pub(super) fn pop(&self, out: &mut [f32]) {
+        match self.queue.lock() {
+            Ok(mut queue) => {
+                for sample in out.iter_mut() {
+                    *sample = queue.pop_front().unwrap_or(0.0);
+                }
+            }
+            Err(_) => out.fill(0.0),
+        }
+        // Silence counts too: the echo canceller needs the whole timeline.
+        if let Ok(mut played) = self.played.lock() {
+            played.extend(out.iter());
+            let excess = played.len().saturating_sub(RATE as usize);
+            played.drain(..excess);
         }
     }
 }
@@ -273,7 +294,13 @@ mod tests {
         }
         assert_eq!(playback.queued(), MAX_QUEUED);
         let mut out = [1.0; 4];
-        Playback::default().pop(&mut out);
+        let idle = Playback::default();
+        idle.pop(&mut out);
         assert_eq!(out, [0.0; 4]);
+        let mut played = Vec::new();
+        idle.take_played(&mut played);
+        assert_eq!(played, [0.0; 4], "silence is played too");
+        idle.take_played(&mut played);
+        assert_eq!(played.len(), 4, "taken only once");
     }
 }
