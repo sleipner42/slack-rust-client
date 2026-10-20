@@ -83,8 +83,10 @@ struct ChatApp {
     selected: Option<Conversation>,
     /// Read position of `selected` when it was opened, if it had unreads then.
     new_after: Option<String>,
-    back: Vec<Conversation>,
-    forward: Vec<Conversation>,
+    /// Places to go back and forward to, and the one last recorded.
+    back: Vec<Place>,
+    forward: Vec<Place>,
+    here: Option<Place>,
     messages: Vec<DisplayMessage>,
     history_cache: HashMap<ComposeTarget, (Instant, Vec<DisplayMessage>)>,
     unread_only: bool,
@@ -282,6 +284,7 @@ impl eframe::App for ChatApp {
         }) {
             self.unread_only = !self.unread_only;
         }
+        self.track_place();
         self.history_navigation(ui.ctx());
         self.search_shortcuts(ui.ctx());
         self.quick_switcher(ui.ctx());
@@ -439,6 +442,7 @@ impl ChatApp {
             editing: None,
             back: Vec::new(),
             forward: Vec::new(),
+            here: None,
             messages: Vec::new(),
             history_cache: HashMap::new(),
             unread_only: settings.unread_only,
@@ -883,7 +887,7 @@ impl ChatApp {
                             !self.back.is_empty(),
                             egui::Button::new(BACK_ARROW).frame(false),
                         )
-                        .on_hover_text(format!("Back · {BACK_LABEL}"))
+                        .on_hover_text(format!("Back · {BACK_LABEL} or Ctrl+O"))
                         .clicked()
                     {
                         self.go_back();
@@ -893,7 +897,7 @@ impl ChatApp {
                             !self.forward.is_empty(),
                             egui::Button::new(FORWARD_ARROW).frame(false),
                         )
-                        .on_hover_text(format!("Forward · {FORWARD_LABEL}"))
+                        .on_hover_text(format!("Forward · {FORWARD_LABEL} or Ctrl+I"))
                         .clicked()
                     {
                         self.go_forward();
@@ -1386,32 +1390,91 @@ impl ChatApp {
     }
 
     fn select(&mut self, conversation: Conversation) {
-        if let Some(current) = self
+        self.track_place();
+        self.show_conversation(conversation);
+        self.track_place();
+    }
+
+    /// The conversation on screen and the thread open beside it; `None`
+    /// while another view (search, activity, to-dos) is shown.
+    fn place(&self) -> Option<Place> {
+        let conversation = self
             .selected
             .clone()
-            .filter(|current| current.id != conversation.id)
-        {
-            push_history(&mut self.back, current);
+            .filter(|_| self.conversation_shown())?;
+        let thread = self
+            .thread
+            .as_ref()
+            .filter(|thread| thread.target.conversation_id == conversation.id)
+            .and_then(|thread| thread.target.thread_ts.clone());
+        Some(Place {
+            conversation,
+            thread,
+        })
+    }
+
+    /// Record a move to another conversation or thread, however it happened,
+    /// so Back returns to where the user was.
+    fn track_place(&mut self) {
+        let Some(now) = self.place() else {
+            return;
+        };
+        if self.here.as_ref() == Some(&now) {
+            return;
+        }
+        if let Some(previous) = self.here.replace(now) {
+            push_history(&mut self.back, previous);
             self.forward.clear();
         }
-        self.show_conversation(conversation);
     }
 
     fn go_back(&mut self) {
-        if let Some(conversation) = self.back.pop() {
-            if let Some(current) = self.selected.clone() {
+        self.track_place();
+        if let Some(place) = self.back.pop() {
+            if let Some(current) = self.here.take() {
                 push_history(&mut self.forward, current);
             }
-            self.show_conversation(conversation);
+            self.go_to(place);
         }
     }
 
     fn go_forward(&mut self) {
-        if let Some(conversation) = self.forward.pop() {
-            if let Some(current) = self.selected.clone() {
+        self.track_place();
+        if let Some(place) = self.forward.pop() {
+            if let Some(current) = self.here.take() {
                 push_history(&mut self.back, current);
             }
-            self.show_conversation(conversation);
+            self.go_to(place);
+        }
+    }
+
+    fn go_to(&mut self, place: Place) {
+        let target = target_of(&place.conversation.id);
+        self.show_conversation(place.conversation.clone());
+        match &place.thread {
+            Some(root) => self.message_action(target, MessageAction::OpenThread(root.clone())),
+            None => {
+                self.thread = None;
+                self.composer_focus = Some(target);
+            }
+        }
+        self.here = Some(place);
+    }
+
+    /// Whether the focused message box has text in it, so Ctrl+I there
+    /// means italic rather than Forward.
+    fn typing(&self, ctx: &egui::Context) -> bool {
+        let Some(focused) = ctx.memory(|memory| memory.focused()) else {
+            return false;
+        };
+        let draft = self
+            .drafts
+            .iter()
+            .find(|(target, _)| target.editor_id() == focused);
+        match draft {
+            Some((_, draft)) => !draft.text.is_empty(),
+            // Another text field, such as search or an edit.
+            None => true,
         }
     }
 
@@ -1423,11 +1486,15 @@ impl ChatApp {
         {
             return;
         }
+        let typing = self.typing(ctx);
         let (back, forward) = ctx.input_mut(|input| {
             (
                 input.consume_key(BACK_SHORTCUT.0, BACK_SHORTCUT.1)
+                    // Vim's jump back.
+                    || input.consume_key(egui::Modifiers::CTRL, egui::Key::O)
                     || input.pointer.button_pressed(egui::PointerButton::Extra1),
                 input.consume_key(FORWARD_SHORTCUT.0, FORWARD_SHORTCUT.1)
+                    || (!typing && input.consume_key(egui::Modifiers::CTRL, egui::Key::I))
                     || input.pointer.button_pressed(egui::PointerButton::Extra2),
             )
         });
@@ -2812,14 +2879,27 @@ fn show_in_folder(path: std::path::PathBuf) -> Option<Box<dyn FnOnce() + Send>> 
     }))
 }
 
-fn push_history(stack: &mut Vec<Conversation>, conversation: Conversation) {
-    if stack.last().is_some_and(|last| last.id == conversation.id) {
+/// Somewhere Back and Forward go: a conversation, with a thread open beside it.
+#[derive(Clone, Debug)]
+struct Place {
+    conversation: Conversation,
+    thread: Option<String>,
+}
+
+impl PartialEq for Place {
+    fn eq(&self, other: &Self) -> bool {
+        self.conversation.id == other.conversation.id && self.thread == other.thread
+    }
+}
+
+fn push_history(stack: &mut Vec<Place>, place: Place) {
+    if stack.last() == Some(&place) {
         return;
     }
     if stack.len() == HISTORY_LIMIT {
         stack.remove(0);
     }
-    stack.push(conversation);
+    stack.push(place);
 }
 
 const HISTORY_LIMIT: usize = 50;
@@ -3525,6 +3605,49 @@ mod tests {
         assert!(app.forward.is_empty());
         app.go_back();
         assert_eq!(selected(&app), "C2");
+    }
+
+    #[test]
+    fn ctrl_i_is_italic_while_typing_and_forward_otherwise() {
+        let mut app = app();
+        let ctx = app.ctx.clone();
+        let target = target_of("C1");
+        assert!(!app.typing(&ctx), "nothing focused");
+        ctx.memory_mut(|memory| memory.request_focus(target.editor_id()));
+        app.drafts.entry(target.clone()).or_default();
+        assert!(!app.typing(&ctx), "an empty message box");
+        app.drafts.get_mut(&target).unwrap().text = "hej".into();
+        assert!(app.typing(&ctx));
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("search_query")));
+        assert!(app.typing(&ctx), "another text field keeps its keys");
+    }
+
+    #[test]
+    fn back_and_forward_include_the_thread_beside_the_conversation() {
+        let mut app = app();
+        let thread = |app: &ChatApp| {
+            app.thread
+                .as_ref()
+                .and_then(|thread| thread.target.thread_ts.clone())
+        };
+        app.select(conversation(&app, "C1"));
+        app.message_action(target_of("C1"), MessageAction::OpenThread("1.0".into()));
+        app.track_place();
+        app.message_action(target_of("C1"), MessageAction::OpenThread("2.0".into()));
+        app.select(conversation(&app, "C2"));
+        app.go_back();
+        assert_eq!(app.selected.as_ref().unwrap().id, "C1");
+        assert_eq!(thread(&app).as_deref(), Some("2.0"));
+        app.go_back();
+        assert_eq!(thread(&app).as_deref(), Some("1.0"), "the earlier thread");
+        app.go_back();
+        assert_eq!(thread(&app), None, "the conversation before any thread");
+        app.go_forward();
+        assert_eq!(thread(&app).as_deref(), Some("1.0"));
+        // Closing the thread is a step too.
+        app.thread = None;
+        app.go_back();
+        assert_eq!(thread(&app).as_deref(), Some("1.0"));
     }
 
     #[test]
