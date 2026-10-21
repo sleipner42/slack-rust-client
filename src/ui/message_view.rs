@@ -24,6 +24,14 @@ pub enum MessageAction {
     Edit(String),
     /// Ask to delete one of the user's messages.
     Delete(String),
+    /// Make the conversation unread from this message on.
+    MarkUnread(String),
+    /// Save the message for later, with a reminder at this Unix time.
+    Remind {
+        ts: String,
+        due: i64,
+        label: &'static str,
+    },
     /// Ask to delete a file the user shared.
     DeleteFile(Attachment),
     SaveEdit,
@@ -537,6 +545,25 @@ fn message_row(
             ui.ctx()
                 .copy_text(crate::domain::message_text::plain_text(&message.blocks));
             ui.close();
+        }
+        if confirmed {
+            // Threads keep their own read point; only conversations for now.
+            if context.allow_threads && ui.button("Mark unread").clicked() {
+                action = Some(MessageAction::MarkUnread(message.ts.clone()));
+                ui.close();
+            }
+            ui.menu_button("Remind me about this", |ui| {
+                for (label, due) in crate::domain::reminders::reminder_choices(&Local::now()) {
+                    if ui.button(label).clicked() {
+                        action = Some(MessageAction::Remind {
+                            ts: message.ts.clone(),
+                            due,
+                            label,
+                        });
+                        ui.close();
+                    }
+                }
+            });
         }
         if can_delete(message, context) {
             ui.separator();

@@ -665,6 +665,23 @@ impl SlackGateway for SlackHttpGateway {
         }
     }
 
+    fn remind_about(&self, conversation_id: &str, ts: &str, due: i64) -> Result<(), SlackError> {
+        let due = due.to_string();
+        let params = [
+            ("item_type", "message"),
+            ("item_id", conversation_id),
+            ("ts", ts),
+            ("date_due", due.as_str()),
+        ];
+        match self.call("saved.add", &params) {
+            // Already saved for later: set its reminder instead.
+            Err(error) if error.0.ends_with("already_saved") => {
+                self.call("saved.update", &params).map(|_| ())
+            }
+            result => result.map(|_| ()),
+        }
+    }
+
     fn delete_message(&self, conversation_id: &str, ts: &str) -> Result<(), SlackError> {
         self.call("chat.delete", &[("channel", conversation_id), ("ts", ts)])
             .map(|_| ())

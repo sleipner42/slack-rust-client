@@ -101,6 +101,13 @@ pub trait SlackGateway: Send + Sync {
             "Editing messages is unavailable for this workspace.".into(),
         ))
     }
+    /// Save a message for later with a reminder at `due` (Unix seconds), as
+    /// Slack's "Remind me about this" does.
+    fn remind_about(&self, _conversation_id: &str, _ts: &str, _due: i64) -> Result<(), SlackError> {
+        Err(SlackError(
+            "Reminders are unavailable for this workspace.".into(),
+        ))
+    }
     /// Remove one of the user's messages.
     fn delete_message(&self, _conversation_id: &str, _ts: &str) -> Result<(), SlackError> {
         Err(SlackError(

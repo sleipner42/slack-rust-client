@@ -639,6 +639,15 @@ impl ChatService {
         }
     }
 
+    pub fn remind_about(
+        &self,
+        conversation_id: &str,
+        ts: &str,
+        due: i64,
+    ) -> Result<(), SlackError> {
+        self.gateway.remind_about(conversation_id, ts, due)
+    }
+
     pub fn delete_file(&self, file_id: &str) -> Result<(), SlackError> {
         self.gateway.delete_file(file_id)
     }

@@ -467,6 +467,10 @@ impl SlackGateway for DemoGateway {
         Ok(())
     }
 
+    fn remind_about(&self, _conversation_id: &str, _ts: &str, _due: i64) -> Result<(), SlackError> {
+        Ok(())
+    }
+
     fn delete_message(&self, conversation_id: &str, ts: &str) -> Result<(), SlackError> {
         let mut messages = self.messages.lock().unwrap();
         let messages = messages

@@ -52,6 +52,20 @@ fn is_newer(ts: &str, reference: Option<&str>) -> bool {
     reference.is_none_or(|reference| ts_seconds(ts) > ts_seconds(reference))
 }
 
+/// The read point that makes the message at `ts` the first unread one:
+/// one microsecond before it, as Slack timestamps count microseconds.
+pub fn unread_from(ts: &str) -> String {
+    let (seconds, micros) = ts.split_once('.').unwrap_or((ts, "0"));
+    let micros = format!("{micros:0<6}");
+    let total = seconds
+        .parse::<u64>()
+        .unwrap_or(0)
+        .saturating_mul(1_000_000)
+        .saturating_add(micros.get(..6).and_then(|m| m.parse().ok()).unwrap_or(0))
+        .saturating_sub(1);
+    format!("{}.{:06}", total / 1_000_000, total % 1_000_000)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +147,12 @@ mod tests {
         record_read(&mut state, "8.0");
         assert_eq!(state.last_read_ts.as_deref(), Some("10.0"));
         assert!(!state.has_unreads);
+    }
+
+    #[test]
+    fn the_read_point_falls_just_before_the_message() {
+        assert_eq!(unread_from("1700000000.000200"), "1700000000.000199");
+        assert_eq!(unread_from("1700000000.000000"), "1699999999.999999");
+        assert_eq!(unread_from("12.5"), "12.499999");
     }
 }

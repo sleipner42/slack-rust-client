@@ -128,6 +128,9 @@ struct ChatApp {
     reload: HashSet<ComposeTarget>,
     pending_reactions: HashSet<(String, String, String)>,
     read_attempts: HashMap<String, String>,
+    /// A conversation the user marked unread: reading it does not mark it
+    /// read again until they leave it.
+    held_unread: Option<String>,
     read_loading: HashSet<String>,
     last_poll: Instant,
     last_counts: Instant,
@@ -165,6 +168,8 @@ enum UiEvent {
         comment: String,
         link: Result<String, SlackError>,
     },
+    MarkedUnread(String, Result<(), SlackError>),
+    Reminded(&'static str, Result<(), SlackError>),
     Deleted {
         conversation_id: String,
         removal: Removal,
@@ -490,6 +495,7 @@ impl ChatApp {
             reload: HashSet::new(),
             pending_reactions: HashSet::new(),
             read_attempts: HashMap::new(),
+            held_unread: None,
             read_loading: HashSet::new(),
             last_poll: Instant::now(),
             last_counts: Instant::now(),
@@ -871,6 +877,43 @@ impl ChatApp {
         }
     }
 
+    /// Make the conversation unread from the message at `ts` on, as Slack
+    /// does: your own messages are never the first unread, so the point
+    /// moves back past them.
+    fn mark_unread(&mut self, list: &ComposeTarget, ts: &str) {
+        let Some(self_id) = self.workspace.as_ref().map(|w| w.self_user_id.clone()) else {
+            return;
+        };
+        let messages = self.list_messages(list);
+        let Some(index) = messages.iter().position(|message| message.ts == ts) else {
+            return;
+        };
+        let first = messages[..=index]
+            .iter()
+            .rev()
+            .find(|message| message.author_key != self_id)
+            .unwrap_or(&messages[index]);
+        let point = crate::domain::unread::unread_from(&first.ts);
+        let conversation_id = list.conversation_id.clone();
+        if let Some(workspace) = &mut self.workspace {
+            let state = workspace
+                .read_states
+                .entry(conversation_id.clone())
+                .or_default();
+            state.last_read_ts = Some(point.clone());
+            state.has_unreads = true;
+        }
+        self.held_unread = Some(conversation_id.clone());
+        self.read_attempts.remove(&conversation_id);
+        self.new_after = Some(point.clone());
+        self.revision += 1;
+        self.rebuild_sidebar();
+        self.spawn(move |service| {
+            let result = service.mark_read(&conversation_id, &point);
+            UiEvent::MarkedUnread(conversation_id, result)
+        });
+    }
+
     fn delete_dialog(&mut self, ctx: &egui::Context) {
         let Some(dialog) = &mut self.deleting else {
             return;
@@ -1149,6 +1192,7 @@ impl ChatApp {
         if at_bottom
             && ui.is_enabled()
             && ui.input(|input| input.focused)
+            && self.held_unread.as_deref() != Some(conversation.id.as_str())
             && let Some(shown) = self.messages.last().map(|message| message.ts.clone())
         {
             let ts = self.read_up_to(&conversation.id, shown);
@@ -1630,6 +1674,7 @@ impl ChatApp {
         if self.is_selected(&conversation.id) {
             return;
         }
+        self.held_unread = None;
         let target = ComposeTarget {
             conversation_id: conversation.id.clone(),
             thread_ts: None,
@@ -1687,6 +1732,10 @@ impl ChatApp {
                     Removal::Message { ts, files },
                 ));
             }
+            MessageAction::MarkUnread(ts) => self.mark_unread(&list, &ts),
+            MessageAction::Remind { ts, due, label } => self.spawn(move |service| {
+                UiEvent::Reminded(label, service.remind_about(&conversation_id, &ts, due))
+            }),
             MessageAction::DeleteFile(attachment) => {
                 if let Some(id) = attachment.file_id {
                     self.deleting = Some(DeleteDialog::new(
@@ -2196,6 +2245,17 @@ impl ChatApp {
                     removal,
                     result,
                 } => self.finish_delete(conversation_id, removal, result),
+                UiEvent::MarkedUnread(conversation_id, result) => {
+                    if let Err(error) = result {
+                        notify(&format!("Could not mark the conversation unread: {error}"));
+                        self.held_unread = None;
+                        self.refresh_conversation(&conversation_id);
+                    }
+                }
+                UiEvent::Reminded(label, result) => match result {
+                    Ok(()) => notify(&format!("Reminder set: {label}")),
+                    Err(error) => notify(&format!("Could not set the reminder: {error}")),
+                },
                 UiEvent::ImageCopied(result) => match result {
                     Ok(image) => {
                         self.ctx.copy_image(image);
@@ -3478,6 +3538,44 @@ mod tests {
         assert_eq!(shown.text, "hello &amp; goodbye");
         let stored = app.service.messages("C1").unwrap();
         assert_eq!(stored.last().unwrap().text, "hello &amp; goodbye");
+    }
+
+    #[test]
+    fn marking_unread_starts_at_the_message_and_skips_your_own() {
+        let mut app = app();
+        app.selected = Some(conversation(&app, "C1"));
+        app.service.send("C1", "mine", None, "unread-test").unwrap();
+        app.messages = app.service.messages("C1").unwrap();
+        let self_id = app.workspace.as_ref().unwrap().self_user_id.clone();
+        let mine = app.messages.last().unwrap().ts.clone();
+        let theirs = app
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.author_key != self_id)
+            .expect("someone else wrote in C1")
+            .ts
+            .clone();
+        app.message_action(target("C1"), MessageAction::MarkUnread(mine));
+        let point = crate::domain::unread::unread_from(&theirs);
+        let state = &app.workspace.as_ref().unwrap().read_states["C1"];
+        assert_eq!(state.last_read_ts.as_deref(), Some(point.as_str()));
+        assert!(state.has_unreads);
+        assert_eq!(app.new_after.as_deref(), Some(point.as_str()));
+        assert_eq!(
+            app.held_unread.as_deref(),
+            Some("C1"),
+            "reading stays unread"
+        );
+        let marked = loop {
+            match app.receiver.recv_timeout(Duration::from_secs(5)).unwrap() {
+                UiEvent::MarkedUnread(id, result) => break (id, result),
+                _ => continue,
+            }
+        };
+        assert!(matches!(marked, (ref id, Ok(())) if id == "C1"));
+        app.select(conversation(&app, "C2"));
+        assert!(app.held_unread.is_none(), "leaving lets it be read again");
     }
 
     #[test]
