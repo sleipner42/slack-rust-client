@@ -380,7 +380,7 @@ pub fn call_bar(
                 if ui
                     .add(
                         egui::Button::new(egui::RichText::new("Leave").color(egui::Color32::WHITE))
-                            .fill(LEAVE),
+                            .fill(theme::DANGER),
                     )
                     .on_hover_text("Leave the huddle")
                     .clicked()
@@ -413,7 +413,6 @@ fn call_status(call: &ActiveCall, names: &HashMap<String, String>) -> String {
 /// Slack rings for about half a minute; this is a fallback if the stop is lost.
 const RING_LIMIT: Duration = Duration::from_secs(60);
 const ANSWER: egui::Color32 = egui::Color32::from_rgb(0, 122, 90);
-const LEAVE: egui::Color32 = egui::Color32::from_rgb(196, 43, 28);
 
 /// A huddle in the conversation: who is in it and a Join button, or how long
 /// it lasted. Returns true when Join is clicked.

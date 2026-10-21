@@ -101,6 +101,18 @@ pub trait SlackGateway: Send + Sync {
             "Editing messages is unavailable for this workspace.".into(),
         ))
     }
+    /// Remove one of the user's messages.
+    fn delete_message(&self, _conversation_id: &str, _ts: &str) -> Result<(), SlackError> {
+        Err(SlackError(
+            "Deleting messages is unavailable for this workspace.".into(),
+        ))
+    }
+    /// Remove a file the user shared, wherever it was shared.
+    fn delete_file(&self, _file_id: &str) -> Result<(), SlackError> {
+        Err(SlackError(
+            "Deleting files is unavailable for this workspace.".into(),
+        ))
+    }
     /// How often and recently the user picked each emoji in Slack.
     fn emoji_usage(&self) -> Result<crate::domain::emoji_usage::EmojiUsage, SlackError> {
         Ok(Default::default())

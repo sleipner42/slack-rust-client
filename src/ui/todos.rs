@@ -256,7 +256,7 @@ impl Todos {
                         for attachment in &message.attachments {
                             ui.add_space(12.0);
                             if let Some(click) =
-                                message_view::attachment_view(ui, attachment, images)
+                                message_view::attachment_view(ui, attachment, images, false)
                             {
                                 image = Some((attachment.clone(), click));
                             }

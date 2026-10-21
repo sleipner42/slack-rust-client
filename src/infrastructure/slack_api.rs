@@ -665,6 +665,15 @@ impl SlackGateway for SlackHttpGateway {
         }
     }
 
+    fn delete_message(&self, conversation_id: &str, ts: &str) -> Result<(), SlackError> {
+        self.call("chat.delete", &[("channel", conversation_id), ("ts", ts)])
+            .map(|_| ())
+    }
+
+    fn delete_file(&self, file_id: &str) -> Result<(), SlackError> {
+        self.call("files.delete", &[("file", file_id)]).map(|_| ())
+    }
+
     fn drafts(&self) -> Result<Vec<RemoteDraft>, SlackError> {
         let body = self.call("drafts.list", &[("is_active", "true"), ("limit", "100")])?;
         Ok(body["drafts"]

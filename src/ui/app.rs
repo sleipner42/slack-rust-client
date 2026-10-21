@@ -16,6 +16,7 @@ use crate::domain::sidebar::{SidebarInput, build_sidebar};
 use crate::domain::unread::{record_incoming, record_read};
 use crate::ui::activity::Activity;
 use crate::ui::composer::{ComposeTarget, Draft, composer};
+use crate::ui::delete_dialog::{DeleteDialog, DeleteOutcome, Removal};
 use crate::ui::dock::DockBadge;
 use crate::ui::emoji_picker::{EmojiPicker, PickerOutcome};
 use crate::ui::huddles::{CallChoice, Huddles};
@@ -136,6 +137,7 @@ struct ChatApp {
     switcher: Option<QuickSwitcher>,
     picker: Option<EmojiPicker>,
     share: Option<ShareDialog>,
+    deleting: Option<DeleteDialog>,
     image_viewer: Option<ImageViewer>,
     dock: DockBadge,
     realtime: Option<Arc<dyn RealtimeSource>>,
@@ -162,6 +164,11 @@ enum UiEvent {
         destination: Conversation,
         comment: String,
         link: Result<String, SlackError>,
+    },
+    Deleted {
+        conversation_id: String,
+        removal: Removal,
+        result: Result<(), SlackError>,
     },
     MessageEdited {
         list: ComposeTarget,
@@ -211,6 +218,7 @@ impl eframe::App for ChatApp {
             || self.switcher.is_some()
             || self.picker.is_some()
             || self.share.is_some()
+            || self.deleting.is_some()
             || self.image_viewer.is_some()
         {
             return;
@@ -290,6 +298,7 @@ impl eframe::App for ChatApp {
         self.quick_switcher(ui.ctx());
         self.emoji_picker(ui.ctx());
         self.share_dialog(ui.ctx());
+        self.delete_dialog(ui.ctx());
         if let Some(choice) = self.huddles.banner(ui.ctx(), &mut self.images) {
             self.call_choice(choice);
         }
@@ -302,12 +311,13 @@ impl eframe::App for ChatApp {
             match click {
                 Some(AttachmentClick::CopyImage) => self.copy_image(attachment),
                 Some(AttachmentClick::Download) => self.download(attachment),
-                Some(AttachmentClick::View) | None => {}
+                Some(AttachmentClick::View | AttachmentClick::Delete) | None => {}
             }
         }
         let modal_open = self.switcher.is_some()
             || self.picker.is_some()
             || self.share.is_some()
+            || self.deleting.is_some()
             || self.image_viewer.is_some();
         ui.add_enabled_ui(!modal_open, |ui| {
             let sidebar_max = (ui.available_width() * 0.3).clamp(180.0, 360.0);
@@ -485,6 +495,7 @@ impl ChatApp {
             switcher: None,
             picker: None,
             share: None,
+            deleting: None,
             image_viewer: None,
             dock: DockBadge::default(),
             realtime,
@@ -783,6 +794,7 @@ impl ChatApp {
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::P)) {
             self.picker = None;
             self.share = None;
+            self.deleting = None;
             self.image_viewer = None;
             self.switcher = Some(QuickSwitcher::new());
         }
@@ -853,6 +865,90 @@ impl ChatApp {
                 });
             }
         }
+    }
+
+    fn delete_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &mut self.deleting else {
+            return;
+        };
+        match dialog.show(ctx) {
+            DeleteOutcome::Open => {}
+            DeleteOutcome::Closed => self.deleting = None,
+            DeleteOutcome::Confirm => {
+                dialog.busy = true;
+                dialog.error = None;
+                let conversation_id = dialog.conversation_id.clone();
+                let removal = dialog.removal.clone();
+                let files = dialog.file_ids();
+                self.spawn(move |service| UiEvent::Deleted {
+                    result: match &removal {
+                        Removal::Message { ts, .. } => {
+                            service.delete_message(&conversation_id, ts, &files)
+                        }
+                        Removal::File { id, .. } => service.delete_file(id),
+                    },
+                    conversation_id,
+                    removal,
+                });
+            }
+        }
+    }
+
+    /// Take a deleted message or file off the screen at once; the refresh
+    /// brings what Slack shows in its place.
+    fn finish_delete(
+        &mut self,
+        conversation_id: String,
+        removal: Removal,
+        result: Result<(), SlackError>,
+    ) {
+        if let Err(error) = result {
+            match self
+                .deleting
+                .as_mut()
+                .filter(|dialog| dialog.removal == removal)
+            {
+                Some(dialog) => {
+                    dialog.busy = false;
+                    dialog.error = Some(error.to_string());
+                }
+                None => notify(&format!("Could not delete: {error}")),
+            }
+            return;
+        }
+        if self
+            .deleting
+            .as_ref()
+            .is_some_and(|dialog| dialog.removal == removal)
+        {
+            self.deleting = None;
+        }
+        let main = self.is_selected(&conversation_id);
+        let lists = [
+            main.then_some(&mut self.messages),
+            self.thread
+                .as_mut()
+                .filter(|thread| thread.target.conversation_id == conversation_id)
+                .map(|thread| &mut thread.messages),
+        ];
+        for messages in lists.into_iter().flatten() {
+            match &removal {
+                Removal::Message { ts, .. } => messages.retain(|message| message.ts != *ts),
+                Removal::File { id, .. } => {
+                    for message in messages.iter_mut() {
+                        message
+                            .attachments
+                            .retain(|attachment| attachment.file_id.as_ref() != Some(id));
+                    }
+                }
+            }
+        }
+        if let (Removal::Message { ts, .. }, Some((_, edit))) = (&removal, &self.editing)
+            && edit.ts == *ts
+        {
+            self.editing = None;
+        }
+        self.refresh_conversation(&conversation_id);
     }
 
     fn conversation(&mut self, ui: &mut egui::Ui) {
@@ -1064,6 +1160,7 @@ impl ChatApp {
                 AttachmentClick::View => self.view_attachment(attachment),
                 AttachmentClick::Download => self.download(attachment),
                 AttachmentClick::CopyImage => self.copy_image(attachment),
+                AttachmentClick::Delete => {}
             }
         }
     }
@@ -1482,6 +1579,7 @@ impl ChatApp {
         if self.switcher.is_some()
             || self.picker.is_some()
             || self.share.is_some()
+            || self.deleting.is_some()
             || self.image_viewer.is_some()
         {
             return;
@@ -1555,6 +1653,35 @@ impl ChatApp {
                 self.composer_focus = Some(list);
             }
             MessageAction::SaveEdit => self.save_edit(),
+            MessageAction::Delete(ts) => {
+                let files = self
+                    .list_messages(&list)
+                    .iter()
+                    .find(|message| message.ts == ts)
+                    .map(|message| {
+                        message
+                            .attachments
+                            .iter()
+                            .filter_map(|attachment| attachment.file_id.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.deleting = Some(DeleteDialog::new(
+                    conversation_id,
+                    Removal::Message { ts, files },
+                ));
+            }
+            MessageAction::DeleteFile(attachment) => {
+                if let Some(id) = attachment.file_id {
+                    self.deleting = Some(DeleteDialog::new(
+                        conversation_id,
+                        Removal::File {
+                            id,
+                            name: attachment.name,
+                        },
+                    ));
+                }
+            }
             MessageAction::RetrySend(id) => {
                 if let Some(request) = self.outbox.retry(&id) {
                     self.dispatch_send(request);
@@ -2036,6 +2163,11 @@ impl ChatApp {
                     text,
                     result,
                 } => self.finish_edit(list, ts, text, result),
+                UiEvent::Deleted {
+                    conversation_id,
+                    removal,
+                    result,
+                } => self.finish_delete(conversation_id, removal, result),
                 UiEvent::ImageCopied(result) => match result {
                     Ok(image) => {
                         self.ctx.copy_image(image);
@@ -2600,6 +2732,7 @@ impl ChatApp {
         self.switcher = None;
         self.picker = None;
         self.share = None;
+        self.deleting = None;
         self.image_viewer = None;
         self.select(conversation);
         match thread_ts {
@@ -3286,6 +3419,45 @@ mod tests {
         assert_eq!(shown.text, "hello &amp; goodbye");
         let stored = app.service.messages("C1").unwrap();
         assert_eq!(stored.last().unwrap().text, "hello &amp; goodbye");
+    }
+
+    #[test]
+    fn deleting_an_own_message_asks_first_and_removes_it() {
+        let mut app = app();
+        let ctx = app.ctx.clone();
+        app.selected = Some(conversation(&app, "C1"));
+        app.service.send("C1", "oops", None, "delete-test").unwrap();
+        app.messages = app.service.messages("C1").unwrap();
+        let ts = app.messages.last().unwrap().ts.clone();
+        app.message_action(target("C1"), MessageAction::Delete(ts.clone()));
+        assert!(app.deleting.is_some(), "asks before deleting");
+        let enter = egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![enter],
+                focused: true,
+                ..Default::default()
+            },
+            |ui| app.delete_dialog(ui.ctx()),
+        );
+        output.textures_delta.clear();
+        assert!(app.deleting.as_ref().is_some_and(|dialog| dialog.busy));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.deleting.is_some() && Instant::now() < deadline {
+            let event = app.receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+            app.sender.send(event).unwrap();
+            app.drain_events();
+        }
+        assert!(app.deleting.is_none());
+        assert!(app.messages.iter().all(|message| message.ts != ts));
+        let stored = app.service.messages("C1").unwrap();
+        assert!(stored.iter().all(|message| message.ts != ts));
     }
 
     #[test]

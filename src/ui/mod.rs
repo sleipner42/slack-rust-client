@@ -2,6 +2,7 @@ mod activity;
 pub mod app;
 mod attachments;
 mod composer;
+mod delete_dialog;
 mod dock;
 mod emoji_completion;
 mod emoji_picker;

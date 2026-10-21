@@ -467,6 +467,30 @@ impl SlackGateway for DemoGateway {
         Ok(())
     }
 
+    fn delete_message(&self, conversation_id: &str, ts: &str) -> Result<(), SlackError> {
+        let mut messages = self.messages.lock().unwrap();
+        let messages = messages
+            .get_mut(conversation_id)
+            .ok_or_else(|| SlackError("chat.delete failed: message_not_found".into()))?;
+        let count = messages.len();
+        messages.retain(|message| message.ts != ts);
+        if messages.len() == count {
+            return Err(SlackError("chat.delete failed: message_not_found".into()));
+        }
+        Ok(())
+    }
+
+    fn delete_file(&self, file_id: &str) -> Result<(), SlackError> {
+        for messages in self.messages.lock().unwrap().values_mut() {
+            for message in messages.iter_mut() {
+                message
+                    .attachments
+                    .retain(|attachment| attachment.file_id.as_deref() != Some(file_id));
+            }
+        }
+        Ok(())
+    }
+
     fn mark_read(&self, conversation_id: &str, ts: &str) -> Result<(), SlackError> {
         record_read(
             self.states

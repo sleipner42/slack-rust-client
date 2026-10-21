@@ -621,6 +621,28 @@ impl ChatService {
         self.gateway.update_message(conversation_id, ts, text)
     }
 
+    /// Delete one of the user's messages, and first the given files shared
+    /// in it.
+    pub fn delete_message(
+        &self,
+        conversation_id: &str,
+        ts: &str,
+        file_ids: &[String],
+    ) -> Result<(), SlackError> {
+        for file_id in file_ids {
+            self.gateway.delete_file(file_id)?;
+        }
+        match self.gateway.delete_message(conversation_id, ts) {
+            // Deleting the last file of a file-only message removes the message.
+            Err(error) if !file_ids.is_empty() && error.0.ends_with("message_not_found") => Ok(()),
+            result => result,
+        }
+    }
+
+    pub fn delete_file(&self, file_id: &str) -> Result<(), SlackError> {
+        self.gateway.delete_file(file_id)
+    }
+
     /// Show an accepted edit at once, using cached names only: no UI-thread I/O.
     pub fn edited_message(&self, message: &DisplayMessage, text: &str) -> DisplayMessage {
         let mut edited = message.clone();

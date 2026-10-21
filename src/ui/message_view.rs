@@ -22,6 +22,10 @@ pub enum MessageAction {
     Download(Attachment),
     CopyImage(Attachment),
     Edit(String),
+    /// Ask to delete one of the user's messages.
+    Delete(String),
+    /// Ask to delete a file the user shared.
+    DeleteFile(Attachment),
     SaveEdit,
     CancelEdit,
     Share(String),
@@ -421,7 +425,8 @@ fn message_row(
                     }
                     for attachment in &message.attachments {
                         ui.add_space(4.0);
-                        match attachment_view(ui, attachment, context.images) {
+                        let deletable = can_delete(message, context);
+                        match attachment_view(ui, attachment, context.images, deletable) {
                             Some(AttachmentClick::View) => {
                                 action = Some(MessageAction::OpenImage(attachment.clone()));
                             }
@@ -430,6 +435,9 @@ fn message_row(
                             }
                             Some(AttachmentClick::CopyImage) => {
                                 action = Some(MessageAction::CopyImage(attachment.clone()));
+                            }
+                            Some(AttachmentClick::Delete) => {
+                                action = Some(MessageAction::DeleteFile(attachment.clone()));
                             }
                             None => {}
                         }
@@ -530,6 +538,16 @@ fn message_row(
                 .copy_text(crate::domain::message_text::plain_text(&message.blocks));
             ui.close();
         }
+        if can_delete(message, context) {
+            ui.separator();
+            if ui
+                .button(RichText::new("Delete message…").color(theme::DANGER))
+                .clicked()
+            {
+                action = Some(MessageAction::Delete(message.ts.clone()));
+                ui.close();
+            }
+        }
     });
     MessageListOutput { action, selecting }
 }
@@ -619,6 +637,11 @@ fn message_toolbar(
     (action, toolbar.min_rect())
 }
 
+/// The user's own messages, once Slack has them.
+fn can_delete(message: &DisplayMessage, context: &MessageContext<'_>) -> bool {
+    message.author_key == context.self_user_id && context.outbox.delivery(message).is_none()
+}
+
 fn toolbar_width(message: &DisplayMessage, context: &MessageContext<'_>) -> f32 {
     let base = if context.allow_threads { 254.0 } else { 206.0 };
     if can_edit(message, context) {
@@ -630,8 +653,7 @@ fn toolbar_width(message: &DisplayMessage, context: &MessageContext<'_>) -> f32 
 
 /// Only the author's own messages, once Slack has them, and not while editing.
 fn can_edit(message: &DisplayMessage, context: &MessageContext<'_>) -> bool {
-    message.author_key == context.self_user_id
-        && context.outbox.delivery(message).is_none()
+    can_delete(message, context)
         && context
             .edit
             .as_ref()
@@ -1050,12 +1072,15 @@ pub enum AttachmentClick {
     View,
     Download,
     CopyImage,
+    Delete,
 }
 
-/// Right-click actions for an image, as in Slack. Copy link is handled here.
+/// Right-click actions for a file, as in Slack. Copy link is handled here;
+/// Delete is offered when `deletable`.
 pub(super) fn image_menu(
     response: &egui::Response,
     attachment: &Attachment,
+    deletable: bool,
 ) -> Option<AttachmentClick> {
     let mut click = None;
     response.context_menu(|ui| {
@@ -1073,6 +1098,16 @@ pub(super) fn image_menu(
             ui.ctx().copy_text(link.clone());
             ui.close();
         }
+        if deletable && attachment.file_id.is_some() {
+            ui.separator();
+            if ui
+                .button(RichText::new("Delete file…").color(theme::DANGER))
+                .clicked()
+            {
+                click = Some(AttachmentClick::Delete);
+                ui.close();
+            }
+        }
     });
     click
 }
@@ -1081,6 +1116,7 @@ pub(super) fn attachment_view(
     ui: &mut egui::Ui,
     attachment: &Attachment,
     images: &mut ImageCache,
+    deletable: bool,
 ) -> Option<AttachmentClick> {
     let mut open = false;
     let mut menu = None;
@@ -1125,13 +1161,13 @@ pub(super) fn attachment_view(
         };
         let (rect, response) = ui.allocate_exact_size(size, sense);
         if playable {
-            menu = image_menu(&response, attachment);
+            menu = image_menu(&response, attachment, deletable);
             open = response
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text("Play video")
                 .clicked();
         } else if attachment.preview_url.is_some() {
-            menu = image_menu(&response, attachment);
+            menu = image_menu(&response, attachment, deletable);
             open = response
                 .on_hover_cursor(egui::CursorIcon::ZoomIn)
                 .on_hover_text("View image")
@@ -1174,27 +1210,31 @@ pub(super) fn attachment_view(
         }
     }
 
-    if playable {
-        open |= ui
+    let name = if playable {
+        let link = ui
             .link(RichText::new(&attachment.name).small())
-            .on_hover_text("Play video")
-            .clicked();
+            .on_hover_text("Play video");
+        open |= link.clicked();
+        link
     } else if attachment.preview_url.is_some() {
-        open |= ui.link(RichText::new(&attachment.name).small()).clicked();
+        let link = ui.link(RichText::new(&attachment.name).small());
+        open |= link.clicked();
+        link
     } else if attachment.full_url.is_some() {
         // Slack's file page only redirects to the desktop app; fetch the file itself.
-        if ui
+        let link = ui
             .link(RichText::new(&attachment.name).small())
-            .on_hover_text("Download to your Downloads folder")
-            .clicked()
-        {
+            .on_hover_text("Download to your Downloads folder");
+        if link.clicked() {
             return Some(AttachmentClick::Download);
         }
+        link
     } else if let Some(target) = target {
-        ui.hyperlink_to(RichText::new(&attachment.name).small(), target);
+        ui.hyperlink_to(RichText::new(&attachment.name).small(), target)
     } else {
-        ui.weak(RichText::new(&attachment.name).small());
-    }
+        ui.weak(RichText::new(&attachment.name).small())
+    };
+    menu = menu.or(image_menu(&name, attachment, deletable));
     menu.or(open.then_some(AttachmentClick::View))
 }
 
@@ -1590,7 +1630,7 @@ mod tests {
                 },
                 |ui| {
                     let top = ui.cursor().top();
-                    attachment_view(ui, attachment, &mut images);
+                    attachment_view(ui, attachment, &mut images, false);
                     height = ui.cursor().top() - top;
                 },
             );

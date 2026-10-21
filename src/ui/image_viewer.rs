@@ -107,7 +107,7 @@ impl ImageViewer {
                                     );
                                     hovered = response.hovered();
                                     clicked = response.clicked();
-                                    menu = image_menu(&response, &self.attachment);
+                                    menu = image_menu(&response, &self.attachment, false);
                                     response.on_hover_cursor(if self.zoom.is_some() {
                                         egui::CursorIcon::ZoomOut
                                     } else {
