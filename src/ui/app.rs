@@ -1260,6 +1260,7 @@ impl ChatApp {
             });
         let thread = self.thread.as_ref().unwrap();
         let mut retry = false;
+        let mut open_source = false;
         let action = theme::timeline_frame()
             .show(ui, |ui| {
                 if self.activity_open
@@ -1268,15 +1269,7 @@ impl ChatApp {
                         .as_ref()
                         .and_then(|activity| activity.selected.as_ref())
                 {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{} · {}",
-                            selection.item.label(),
-                            selection.source
-                        ))
-                        .small()
-                        .weak(),
-                    );
+                    open_source = source_line(ui, Some(selection.item.label()), &selection.source);
                     ui.add_space(8.0);
                     if let Some(error) = self
                         .activity
@@ -1289,7 +1282,7 @@ impl ChatApp {
                 if self.search_open
                     && let Some(selection) = &self.search.selected
                 {
-                    ui.label(egui::RichText::new(&selection.source).small().weak());
+                    open_source = source_line(ui, None, &selection.source);
                     ui.add_space(8.0);
                 }
                 if let Some(error) = &thread.error {
@@ -1349,6 +1342,22 @@ impl ChatApp {
             .inner;
         if retry {
             self.load_messages(target.clone());
+        }
+        if open_source {
+            // Open the channel itself, with the thread beside it for a reply.
+            let thread_ts = if self.activity_open {
+                self.activity
+                    .as_ref()
+                    .and_then(|activity| activity.selected.as_ref())
+                    .and_then(|row| row.item.thread_ts.clone())
+            } else {
+                self.search
+                    .selected
+                    .as_ref()
+                    .and_then(|selection| selection.thread_ts.clone())
+            };
+            self.open_conversation(&target.conversation_id, thread_ts);
+            return;
         }
         if let Some(action) = action {
             self.message_action(target, action);
@@ -2267,7 +2276,7 @@ impl ChatApp {
                 UiEvent::OpenFromNotification {
                     conversation_id,
                     thread_ts,
-                } => self.open_from_notification(&conversation_id, thread_ts),
+                } => self.open_conversation(&conversation_id, thread_ts),
                 UiEvent::ReactionSet {
                     conversation_id,
                     ts,
@@ -2735,7 +2744,9 @@ impl ChatApp {
         })
     }
 
-    fn open_from_notification(&mut self, conversation_id: &str, thread_ts: Option<String>) {
+    /// Show a conversation, and the thread `thread_ts` beside it, closing
+    /// whatever is in the way.
+    fn open_conversation(&mut self, conversation_id: &str, thread_ts: Option<String>) {
         let Some(conversation) = self.workspace.as_ref().and_then(|workspace| {
             workspace
                 .conversations
@@ -3014,6 +3025,22 @@ fn target_of(conversation_id: &str) -> ComposeTarget {
 const APP_TITLE: &str = "Better Slack";
 
 /// An app status, such as a finished download, shown as a desktop notification.
+/// The small line naming where a message is, after an optional kind such as
+/// "Thread reply"; the conversation name is a link. Returns whether it was
+/// clicked.
+fn source_line(ui: &mut egui::Ui, kind: Option<&str>, source: &str) -> bool {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        if let Some(kind) = kind {
+            ui.label(egui::RichText::new(format!("{kind} · ")).small().weak());
+        }
+        ui.link(egui::RichText::new(source).small())
+            .on_hover_text("Open the conversation")
+            .clicked()
+    })
+    .inner
+}
+
 fn notify(text: &str) {
     crate::infrastructure::notifications::show(APP_TITLE, text, None);
 }
@@ -3436,6 +3463,25 @@ mod tests {
         assert_eq!(shown.text, "hello &amp; goodbye");
         let stored = app.service.messages("C1").unwrap();
         assert_eq!(stored.last().unwrap().text, "hello &amp; goodbye");
+    }
+
+    #[test]
+    fn the_channel_name_in_activity_opens_the_channel_and_its_thread() {
+        let mut app = app();
+        app.activity_open = true;
+        app.open_conversation("C1", Some("1.0".into()));
+        assert!(!app.activity_open);
+        assert!(app.is_selected("C1"));
+        assert_eq!(
+            app.thread.as_ref().map(|thread| thread.target.clone()),
+            Some(ComposeTarget {
+                conversation_id: "C1".into(),
+                thread_ts: Some("1.0".into()),
+            })
+        );
+        app.search_open = true;
+        app.open_conversation("C1", None);
+        assert!(!app.search_open && app.thread.is_none());
     }
 
     #[test]
