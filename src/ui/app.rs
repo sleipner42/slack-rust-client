@@ -1149,8 +1149,9 @@ impl ChatApp {
         if at_bottom
             && ui.is_enabled()
             && ui.input(|input| input.focused)
-            && let Some(ts) = self.messages.last().map(|message| message.ts.clone())
+            && let Some(shown) = self.messages.last().map(|message| message.ts.clone())
         {
+            let ts = self.read_up_to(&conversation.id, shown);
             self.mark_read(conversation.id, ts);
         }
     }
@@ -2046,6 +2047,18 @@ impl ChatApp {
         {
             self.load_messages(target);
         }
+    }
+
+    /// Where reading to the bottom, past the newest message `shown`, reads
+    /// to. Joins and topic changes are hidden but still unread to Slack, so
+    /// that is the channel's newest message.
+    fn read_up_to(&self, conversation_id: &str, shown: String) -> String {
+        self.workspace
+            .as_ref()
+            .and_then(|workspace| workspace.read_states.get(conversation_id))
+            .and_then(|state| state.latest_ts.clone())
+            .filter(|latest| ts_seconds(latest) > ts_seconds(&shown))
+            .unwrap_or(shown)
     }
 
     fn mark_read(&mut self, conversation_id: String, ts: String) {
@@ -3423,6 +3436,23 @@ mod tests {
         assert_eq!(shown.text, "hello &amp; goodbye");
         let stored = app.service.messages("C1").unwrap();
         assert_eq!(stored.last().unwrap().text, "hello &amp; goodbye");
+    }
+
+    #[test]
+    fn reading_to_the_bottom_also_reads_hidden_joins_and_topic_changes() {
+        let mut app = app();
+        let state = app
+            .workspace
+            .as_mut()
+            .unwrap()
+            .read_states
+            .entry("C1".into())
+            .or_default();
+        state.latest_ts = Some("20.0".into());
+        state.has_unreads = true;
+        assert_eq!(app.read_up_to("C1", "10.0".into()), "20.0");
+        assert_eq!(app.read_up_to("C1", "30.0".into()), "30.0");
+        assert_eq!(app.read_up_to("C9", "10.0".into()), "10.0");
     }
 
     #[test]
