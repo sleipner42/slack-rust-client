@@ -595,6 +595,7 @@ impl ChatApp {
             .iter()
             .filter(|conversation| needs_attention(workspace, &conversation.id))
             .count();
+        let mut page = None;
 
         if ui
             .add_sized(
@@ -613,14 +614,7 @@ impl ChatApp {
             )
             .clicked()
         {
-            self.todos_open = true;
-            self.activity_open = false;
-            self.search_open = false;
-            self.thread = None;
-            self.composer_focus = None;
-            if let Some(todos) = &mut self.todos {
-                todos.open();
-            }
+            page = Some(Place::Todos);
         }
         let activity_response = ui.add_sized(
             [ui.available_width(), 30.0],
@@ -637,16 +631,7 @@ impl ChatApp {
             );
         }
         if activity_response.clicked() {
-            if !self.activity_open {
-                self.thread = None;
-            }
-            self.activity_open = true;
-            self.todos_open = false;
-            self.search_open = false;
-            self.composer_focus = None;
-            if let Some(activity) = &mut self.activity {
-                activity.open();
-            }
+            page = Some(Place::Activity);
         }
         ui.add_space(8.0);
         // The unread filter is a view setting, so it sits on the divider above
@@ -797,6 +782,11 @@ impl ChatApp {
             });
         if let Some(conversation) = clicked {
             self.select(conversation);
+        }
+        match page {
+            Some(Place::Todos) => self.open_todos(),
+            Some(Place::Activity) => self.open_activity(),
+            _ => {}
         }
     }
 
@@ -1552,19 +1542,25 @@ impl ChatApp {
         self.track_place();
     }
 
-    /// The conversation on screen and the thread open beside it; `None`
-    /// while another view (search, activity, to-dos) is shown.
+    /// The page on screen: to-dos, activity, search, or a conversation and
+    /// the thread open beside it. `None` before any is chosen.
     fn place(&self) -> Option<Place> {
-        let conversation = self
-            .selected
-            .clone()
-            .filter(|_| self.conversation_shown())?;
+        if self.todos_open {
+            return Some(Place::Todos);
+        }
+        if self.activity_open {
+            return Some(Place::Activity);
+        }
+        if self.search_open {
+            return Some(Place::Search);
+        }
+        let conversation = self.selected.clone()?;
         let thread = self
             .thread
             .as_ref()
             .filter(|thread| thread.target.conversation_id == conversation.id)
             .and_then(|thread| thread.target.thread_ts.clone());
-        Some(Place {
+        Some(Place::Conversation {
             conversation,
             thread,
         })
@@ -1606,16 +1602,52 @@ impl ChatApp {
     }
 
     fn go_to(&mut self, place: Place) {
-        let target = target_of(&place.conversation.id);
-        self.show_conversation(place.conversation.clone());
-        match &place.thread {
-            Some(root) => self.message_action(target, MessageAction::OpenThread(root.clone())),
-            None => {
-                self.thread = None;
-                self.composer_focus = Some(target);
+        match &place {
+            Place::Todos => self.open_todos(),
+            Place::Activity => self.open_activity(),
+            Place::Search => self.open_search(None),
+            Place::Conversation {
+                conversation,
+                thread,
+            } => {
+                let target = target_of(&conversation.id);
+                self.show_conversation(conversation.clone());
+                match thread {
+                    Some(root) => {
+                        self.message_action(target, MessageAction::OpenThread(root.clone()))
+                    }
+                    None => {
+                        self.thread = None;
+                        self.composer_focus = Some(target);
+                    }
+                }
             }
         }
         self.here = Some(place);
+    }
+
+    fn open_todos(&mut self) {
+        self.todos_open = true;
+        self.activity_open = false;
+        self.search_open = false;
+        self.thread = None;
+        self.composer_focus = None;
+        if let Some(todos) = &mut self.todos {
+            todos.open();
+        }
+    }
+
+    fn open_activity(&mut self) {
+        if !self.activity_open {
+            self.thread = None;
+        }
+        self.activity_open = true;
+        self.todos_open = false;
+        self.search_open = false;
+        self.composer_focus = None;
+        if let Some(activity) = &mut self.activity {
+            activity.open();
+        }
     }
 
     /// Whether the focused message box has text in it, so Ctrl+I there
@@ -3131,16 +3163,34 @@ fn show_in_folder(path: std::path::PathBuf) -> Option<Box<dyn FnOnce() + Send>> 
     }))
 }
 
-/// Somewhere Back and Forward go: a conversation, with a thread open beside it.
+/// Somewhere Back and Forward go: a page, or a conversation with a thread
+/// open beside it.
 #[derive(Clone, Debug)]
-struct Place {
-    conversation: Conversation,
-    thread: Option<String>,
+enum Place {
+    Todos,
+    Activity,
+    Search,
+    Conversation {
+        conversation: Conversation,
+        thread: Option<String>,
+    },
 }
 
 impl PartialEq for Place {
     fn eq(&self, other: &Self) -> bool {
-        self.conversation.id == other.conversation.id && self.thread == other.thread
+        match (self, other) {
+            (
+                Self::Conversation {
+                    conversation,
+                    thread,
+                },
+                Self::Conversation {
+                    conversation: other,
+                    thread: other_thread,
+                },
+            ) => conversation.id == other.id && thread == other_thread,
+            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+        }
     }
 }
 
@@ -3592,6 +3642,30 @@ mod tests {
             )),
             "conversations.replies failed: ratelimited"
         );
+    }
+
+    #[test]
+    fn back_and_forward_include_activity_to_dos_and_search() {
+        let mut app = app();
+        app.open_activity();
+        app.track_place();
+        app.select(conversation(&app, "C1"));
+        app.open_todos();
+        app.track_place();
+        app.open_search(None);
+        app.track_place();
+        app.go_back();
+        assert!(app.todos_open);
+        app.go_back();
+        assert!(app.conversation_shown() && app.is_selected("C1"));
+        app.go_back();
+        assert!(app.activity_open && !app.todos_open);
+        app.go_forward();
+        assert!(app.conversation_shown());
+        app.go_forward();
+        assert!(app.todos_open);
+        app.go_forward();
+        assert!(app.search_open && !app.todos_open);
     }
 
     #[test]
