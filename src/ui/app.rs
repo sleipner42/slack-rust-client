@@ -1287,7 +1287,9 @@ impl ChatApp {
                 }
                 if let Some(error) = &thread.error {
                     ui.colored_label(theme::SELF_MENTION_TEXT, error);
-                    retry = ui.button("Retry thread").clicked();
+                    if error != NOT_A_MEMBER {
+                        retry = ui.button("Retry thread").clicked();
+                    }
                 }
                 if self.loading.contains(&target)
                     && thread.messages.is_empty()
@@ -2173,7 +2175,7 @@ impl ChatApp {
                                 .as_mut()
                                 .filter(|thread| thread.target == target)
                             {
-                                thread.error = Some(error.to_string());
+                                thread.error = Some(thread_error(&error));
                             }
                         }
                     }
@@ -3025,6 +3027,19 @@ fn target_of(conversation_id: &str) -> ComposeTarget {
 const APP_TITLE: &str = "Better Slack";
 
 /// An app status, such as a finished download, shown as a desktop notification.
+/// Why a thread could not be shown, in words; Slack says a conversation the
+/// user cannot see does not exist.
+fn thread_error(error: &SlackError) -> String {
+    if error.0.ends_with("channel_not_found") {
+        NOT_A_MEMBER.into()
+    } else {
+        error.to_string()
+    }
+}
+
+const NOT_A_MEMBER: &str =
+    "This thread is in a conversation you are not in, so Slack does not show it here.";
+
 /// The small line naming where a message is, after an optional kind such as
 /// "Thread reply"; the conversation name is a link. Returns whether it was
 /// clicked.
@@ -3463,6 +3478,22 @@ mod tests {
         assert_eq!(shown.text, "hello &amp; goodbye");
         let stored = app.service.messages("C1").unwrap();
         assert_eq!(stored.last().unwrap().text, "hello &amp; goodbye");
+    }
+
+    #[test]
+    fn threads_in_conversations_you_are_not_in_say_so() {
+        assert_eq!(
+            thread_error(&SlackError(
+                "conversations.replies failed: channel_not_found".into()
+            )),
+            NOT_A_MEMBER
+        );
+        assert_eq!(
+            thread_error(&SlackError(
+                "conversations.replies failed: ratelimited".into()
+            )),
+            "conversations.replies failed: ratelimited"
+        );
     }
 
     #[test]
