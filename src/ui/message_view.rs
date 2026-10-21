@@ -103,10 +103,11 @@ struct HoveredToolbar {
     rect: egui::Rect,
 }
 
-#[derive(Default)]
 struct ToolbarHover {
     previous: Option<HoveredToolbar>,
     current: Option<HoveredToolbar>,
+    /// Where this list's message menus keep their state.
+    menus: egui::Id,
 }
 
 pub(super) const QUICK_REACTIONS: [(&str, &str); 3] = [
@@ -158,6 +159,7 @@ pub fn message_list(
     let mut toolbar_hover = ToolbarHover {
         previous: cache.toolbar.take(),
         current: None,
+        menus: ui.id().with("message_menus"),
     };
     let mut measured = false;
     for message in messages {
@@ -237,9 +239,13 @@ pub fn message_list(
     if let Some(hovered) = &mut toolbar_hover.current
         && let Some(message) = messages.iter().find(|message| message.ts == hovered.ts)
     {
-        let (toolbar_action, rect) = message_toolbar(ui, message, hovered.rect, context);
+        let (toolbar_action, rect, more) = message_toolbar(ui, message, hovered.rect, context);
         if toolbar_action.is_some() {
             action = toolbar_action;
+        }
+        if let Some(position) = more {
+            open_menu(ui.ctx(), toolbar_hover.menus.with(&message.ts), position);
+            ui.ctx().request_repaint();
         }
         hovered.rect = rect;
     }
@@ -304,6 +310,7 @@ fn message_row(
     toolbar_hover: &mut ToolbarHover,
     offscreen: &egui::Ui,
 ) -> MessageListOutput {
+    let menu = toolbar_hover.menus.with(&message.ts);
     let mut action = None;
     let mut selecting = false;
     let delivery = context.outbox.delivery(message);
@@ -532,51 +539,88 @@ fn message_row(
             rect: toolbar_rect,
         });
     }
-    response.context_menu(|ui| {
-        if can_edit(message, context) && ui.button("Edit message").clicked() {
-            action = Some(MessageAction::Edit(message.ts.clone()));
-            ui.close();
-        }
-        if confirmed && ui.button("Share message…").clicked() {
-            action = Some(MessageAction::Share(message.ts.clone()));
-            ui.close();
-        }
-        if ui.button("Copy message text").clicked() {
-            ui.ctx()
-                .copy_text(crate::domain::message_text::plain_text(&message.blocks));
-            ui.close();
-        }
-        if confirmed {
-            // Threads keep their own read point; only conversations for now.
-            if context.allow_threads && ui.button("Mark unread").clicked() {
-                action = Some(MessageAction::MarkUnread(message.ts.clone()));
-                ui.close();
-            }
-            ui.menu_button("Remind me about this", |ui| {
-                for (label, due) in crate::domain::reminders::reminder_choices(&Local::now()) {
-                    if ui.button(label).clicked() {
-                        action = Some(MessageAction::Remind {
-                            ts: message.ts.clone(),
-                            due,
-                            label,
-                        });
-                        ui.close();
-                    }
-                }
-            });
-        }
-        if can_delete(message, context) {
-            ui.separator();
-            if ui
-                .button(RichText::new("Delete message…").color(theme::DANGER))
-                .clicked()
-            {
-                action = Some(MessageAction::Delete(message.ts.clone()));
-                ui.close();
-            }
-        }
-    });
+    // Right-click anywhere on the message, as in Slack. The row only senses
+    // hover, so the click is read here, unless an image took it for its menu.
+    if hovered
+        && !egui::Popup::is_any_open(ui.ctx())
+        && ui.input(|input| input.pointer.secondary_clicked())
+        && let Some(position) = ui.ctx().pointer_interact_pos()
+    {
+        open_menu(ui.ctx(), menu, position);
+    }
+    let position = ui
+        .ctx()
+        .data(|data| data.get_temp::<egui::Pos2>(menu))
+        .unwrap_or_default();
+    if let Some(chosen) = egui::Popup::new(menu, ui.ctx().clone(), position, ui.layer_id())
+        .kind(egui::PopupKind::Menu)
+        .layout(egui::Layout::top_down_justified(egui::Align::Min))
+        .style(egui::containers::menu::menu_style)
+        .open_memory(None)
+        .show(|ui| message_menu(ui, message, confirmed, context))
+        .and_then(|response| response.inner)
+    {
+        action = Some(chosen);
+    }
     MessageListOutput { action, selecting }
+}
+
+fn open_menu(ctx: &egui::Context, menu: egui::Id, position: egui::Pos2) {
+    ctx.data_mut(|data| data.insert_temp(menu, position));
+    egui::Popup::open_id(ctx, menu);
+}
+
+/// More actions for a message: the right-click menu and the toolbar's ⋯.
+fn message_menu(
+    ui: &mut egui::Ui,
+    message: &DisplayMessage,
+    confirmed: bool,
+    context: &MessageContext<'_>,
+) -> Option<MessageAction> {
+    let mut action = None;
+    if can_edit(message, context) && ui.button("Edit message").clicked() {
+        action = Some(MessageAction::Edit(message.ts.clone()));
+        ui.close();
+    }
+    if confirmed && ui.button("Share message…").clicked() {
+        action = Some(MessageAction::Share(message.ts.clone()));
+        ui.close();
+    }
+    if ui.button("Copy message text").clicked() {
+        ui.ctx()
+            .copy_text(crate::domain::message_text::plain_text(&message.blocks));
+        ui.close();
+    }
+    if confirmed {
+        // Threads keep their own read point; only conversations for now.
+        if context.allow_threads && ui.button("Mark unread").clicked() {
+            action = Some(MessageAction::MarkUnread(message.ts.clone()));
+            ui.close();
+        }
+        ui.menu_button("Remind me about this", |ui| {
+            for (label, due) in crate::domain::reminders::reminder_choices(&Local::now()) {
+                if ui.button(label).clicked() {
+                    action = Some(MessageAction::Remind {
+                        ts: message.ts.clone(),
+                        due,
+                        label,
+                    });
+                    ui.close();
+                }
+            }
+        });
+    }
+    if can_delete(message, context) {
+        ui.separator();
+        if ui
+            .button(RichText::new("Delete message…").color(theme::DANGER))
+            .clicked()
+        {
+            action = Some(MessageAction::Delete(message.ts.clone()));
+            ui.close();
+        }
+    }
+    action
 }
 
 // Draw after all message rows so short grouped rows cannot paint over the controls.
@@ -586,8 +630,9 @@ fn message_toolbar(
     message: &DisplayMessage,
     toolbar_rect: egui::Rect,
     context: &mut MessageContext<'_>,
-) -> (Option<MessageAction>, egui::Rect) {
+) -> (Option<MessageAction>, egui::Rect, Option<egui::Pos2>) {
     let mut action = None;
+    let mut more = None;
     let mut toolbar = ui.new_child(
         egui::UiBuilder::new()
             .id_salt(("message_actions", &message.ts))
@@ -660,8 +705,17 @@ fn message_toolbar(
             {
                 action = Some(MessageAction::Edit(message.ts.clone()));
             }
+            let button = ui
+                .add_sized(
+                    [28.0, 28.0],
+                    egui::Button::new("⋯").frame_when_inactive(false),
+                )
+                .on_hover_text("More actions");
+            if button.clicked() {
+                more = Some(button.rect.left_bottom());
+            }
         });
-    (action, toolbar.min_rect())
+    (action, toolbar.min_rect(), more)
 }
 
 /// The user's own messages, once Slack has them.
@@ -670,7 +724,7 @@ fn can_delete(message: &DisplayMessage, context: &MessageContext<'_>) -> bool {
 }
 
 fn toolbar_width(message: &DisplayMessage, context: &MessageContext<'_>) -> f32 {
-    let base = if context.allow_threads { 254.0 } else { 206.0 };
+    let base = if context.allow_threads { 286.0 } else { 238.0 };
     if can_edit(message, context) {
         base + 44.0
     } else {
@@ -1626,6 +1680,32 @@ mod tests {
         );
         assert!(thread.contains_key("Add Check mark reaction"));
         assert!(!thread.contains_key("Reply"));
+
+        // Right-click a message for more actions; the row only senses hover.
+        let point = egui::pos2(body.left() + 2.0, body.center().y);
+        let secondary = |pressed| egui::Event::PointerButton {
+            pos: point,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(&messages, true, vec![egui::Event::PointerMoved(point)]);
+        frame(&messages, true, vec![secondary(true), secondary(false)]);
+        let (_, menu, _) = frame(&messages, true, vec![]);
+        let (action, _, _) = frame(&messages, true, click(menu["Mark unread"].center()));
+        assert!(matches!(action, Some(MessageAction::MarkUnread(ts)) if ts == messages[1].ts));
+        let (_, closed, _) = frame(&messages, true, vec![]);
+        assert!(
+            !closed.contains_key("Mark unread"),
+            "choosing closes the menu"
+        );
+
+        // The toolbar's ⋯ opens the same menu.
+        let (_, hovered, _) = frame(&messages, true, vec![egui::Event::PointerMoved(point)]);
+        frame(&messages, true, click(hovered["⋯"].center()));
+        let (_, menu, _) = frame(&messages, true, vec![]);
+        assert!(menu.contains_key("Remind me about this ⏵"));
+        assert!(menu.contains_key("Copy message text"));
     }
 
     #[test]
