@@ -259,9 +259,10 @@ impl eframe::App for ChatApp {
         if let Some(todos) = &mut self.todos {
             todos.poll();
         }
+        let mut until_activity = None;
         let fresh = self.activity.as_mut().map_or_else(Vec::new, |activity| {
             activity.poll();
-            activity.refresh(self.activity_open);
+            until_activity = activity.refresh(self.activity_open);
             activity.take_fresh()
         });
         for row in fresh {
@@ -280,7 +281,10 @@ impl eframe::App for ChatApp {
         let until_counts = self
             .counts_interval()
             .saturating_sub(self.last_counts.elapsed());
-        ctx.request_repaint_after(until_poll.min(until_counts).max(Duration::from_secs(1)));
+        let next = until_activity.map_or(until_poll.min(until_counts), |until_activity| {
+            until_poll.min(until_counts).min(until_activity)
+        });
+        ctx.request_repaint_after(next.max(Duration::from_secs(1)));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

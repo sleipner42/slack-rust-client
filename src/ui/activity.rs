@@ -103,25 +103,37 @@ impl Activity {
         self.feed_stale = true;
     }
 
-    /// Keep the feed behind the sidebar dot and notifications current. Leaves a
-    /// list the user is reading alone; its Refresh button covers that.
-    pub fn refresh(&mut self, showing: bool) {
-        let query = ActivityQuery::default();
-        if showing && self.query == query {
-            return;
-        }
-        let Some(list) = self.lists.get(&query) else {
-            return;
-        };
-        let due = if self.feed_stale {
-            STALE_REFRESH
-        } else {
-            IDLE_REFRESH
-        };
-        if !list.busy && list.updated.is_some_and(|time| time.elapsed() >= due) {
+    /// Keep the feed behind the sidebar dot and notifications current, and
+    /// the list on screen too, soon after something happens.
+    /// Returns how long until the next refresh is due, so the app wakes for it.
+    pub fn refresh(&mut self, showing: bool) -> Option<Duration> {
+        let feed = ActivityQuery::default();
+        if self.wait(feed, showing) == Some(Duration::ZERO) {
             self.feed_stale = false;
-            self.load_query(query, String::new());
+            self.load_query(feed, String::new());
         }
+        if showing && self.query != feed && self.wait(self.query, showing) == Some(Duration::ZERO) {
+            self.load_query(self.query, String::new());
+        }
+        let shown = (showing && self.query != feed).then_some(self.query);
+        [Some(feed), shown]
+            .into_iter()
+            .flatten()
+            .filter_map(|query| self.wait(query, showing))
+            .min()
+    }
+
+    /// How long until a loaded list should refresh; `None` while it loads.
+    fn wait(&self, query: ActivityQuery, showing: bool) -> Option<Duration> {
+        let list = self.lists.get(&query).filter(|list| !list.busy)?;
+        let feed = query == ActivityQuery::default();
+        let stale = if feed { self.feed_stale } else { self.dirty };
+        let due = match (stale, showing && query == self.query) {
+            (true, true) => SHOWN_REFRESH,
+            (true, false) => STALE_REFRESH,
+            (false, _) => IDLE_REFRESH,
+        };
+        Some(due.saturating_sub(list.updated?.elapsed()))
     }
 
     /// Unread mentions and direct messages that arrived since the last call.
@@ -280,9 +292,13 @@ impl Activity {
                     list.busy = false;
                     match result {
                         Ok(page) => {
-                            if request.cursor.is_empty() {
-                                list.items.clear();
-                            }
+                            let first_page = request.cursor.is_empty();
+                            let earlier = if first_page {
+                                std::mem::take(&mut list.items)
+                            } else {
+                                Vec::new()
+                            };
+                            let earlier_cursor = list.next_cursor.clone();
                             for mut row in page.items {
                                 if let Some((ts, revision)) = self.read_marks.get(&row.item.key)
                                     && *revision > request.read_revision
@@ -317,6 +333,18 @@ impl Activity {
                             } else {
                                 page.next_cursor
                             };
+                            // A refresh puts what is new on top without
+                            // dropping older pages the user loaded.
+                            if first_page && earlier.len() > list.items.len() {
+                                let keys: HashSet<String> =
+                                    list.items.iter().map(|row| row.item.key.clone()).collect();
+                                list.items.extend(
+                                    earlier
+                                        .into_iter()
+                                        .filter(|row| !keys.contains(&row.item.key)),
+                                );
+                                list.next_cursor = earlier_cursor;
+                            }
                             list.error = page.warning;
                             list.loaded = true;
                             list.updated = Some(Instant::now());
@@ -454,6 +482,8 @@ const NOTIFY_KINDS: [&str; 7] = [
     "bot_dm_bundle",
 ];
 const STALE_REFRESH: Duration = Duration::from_secs(15);
+/// How soon the list on screen follows something that happened.
+const SHOWN_REFRESH: Duration = Duration::from_secs(3);
 const IDLE_REFRESH: Duration = Duration::from_secs(90);
 const ROW_HEIGHT: f32 = 82.0;
 
@@ -797,16 +827,52 @@ mod tests {
                 ..Default::default()
             },
         );
-        activity.refresh(false);
+        let wait = activity.refresh(false).expect("a refresh is scheduled");
+        assert!(wait <= IDLE_REFRESH - STALE_REFRESH && wait > Duration::ZERO);
         assert!(!activity.lists[&all].busy, "nothing new happened yet");
         activity.invalidate();
         activity.refresh(true);
-        assert!(
-            !activity.lists[&all].busy,
-            "the open list waits for Refresh"
+        assert!(activity.lists[&all].busy, "the open list follows along");
+    }
+
+    #[test]
+    fn a_refresh_keeps_older_pages_and_puts_new_activity_on_top() {
+        let mut activity = activity();
+        let all = ActivityQuery::default();
+        let request = |cursor: &str| Request {
+            query: all,
+            cursor: cursor.into(),
+            read_revision: 0,
+        };
+        let page = |keys: &[&str], cursor: &str| ActivityPage {
+            items: keys.iter().map(|key| row(key)).collect(),
+            next_cursor: cursor.into(),
+            warning: None,
+        };
+        let load = |activity: &mut Activity, cursor, keys, next| {
+            activity
+                .sender
+                .send(ResultEvent::Loaded(request(cursor), Ok(page(keys, next))))
+                .unwrap();
+            activity.poll();
+            activity.lists[&all]
+                .items
+                .iter()
+                .map(|row| row.item.key.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(load(&mut activity, "", &["b", "c"], "p2"), ["b", "c"]);
+        assert_eq!(load(&mut activity, "p2", &["d"], "p3"), ["b", "c", "d"]);
+        assert_eq!(
+            load(&mut activity, "", &["a", "b"], "p2"),
+            ["a", "b", "c", "d"]
         );
-        activity.refresh(false);
-        assert!(activity.lists[&all].busy);
+        assert_eq!(activity.lists[&all].next_cursor, "p3", "still after d");
+        assert_eq!(
+            load(&mut activity, "", &["a", "b", "c", "d", "e"], "q"),
+            ["a", "b", "c", "d", "e"]
+        );
+        assert_eq!(activity.lists[&all].next_cursor, "q");
     }
 
     #[test]
