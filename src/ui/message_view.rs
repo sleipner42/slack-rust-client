@@ -801,6 +801,7 @@ fn edit_box(
                 .interactive(!edit.saving)
                 .show(ui);
             super::markup_editor::spelling(ui, &output, id, &mut edit.text);
+            super::markup_editor::reveal_cursor(ui, &output, id);
             if let Some(mention) =
                 super::emoji_completion::popup(ui, &output, id, &mut edit.text, &mut completion)
             {

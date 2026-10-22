@@ -185,6 +185,29 @@ fn refocus_id(id: egui::Id) -> egui::Id {
     id.with("refocus")
 }
 
+/// Keep the cursor in view when it moved since the last frame. The editor
+/// only does this for its own edits, not for newlines and formatting added
+/// by [`shortcuts`] and friends; call after showing it.
+pub fn reveal_cursor(ui: &egui::Ui, output: &egui::text_edit::TextEditOutput, id: egui::Id) {
+    let Some(range) = output.cursor_range else {
+        return;
+    };
+    let cursor = range.primary;
+    let key = id.with("revealed_cursor");
+    let last = ui.ctx().data_mut(|data| {
+        let last = data.get_temp::<egui::text::CCursor>(key);
+        data.insert_temp(key, cursor);
+        last
+    });
+    if last.is_some_and(|last| last != cursor) && output.response.has_focus() {
+        let rect = output
+            .galley
+            .pos_from_cursor(cursor)
+            .translate(output.galley_pos.to_vec2());
+        ui.scroll_to_rect(rect.expand(2.0), None);
+    }
+}
+
 /// The formatting buttons above the composer.
 pub fn toolbar(ui: &mut egui::Ui, id: egui::Id, text: &mut String) {
     ui.horizontal(|ui| {

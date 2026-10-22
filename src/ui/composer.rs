@@ -74,6 +74,7 @@ pub fn composer(
                         ))
                         .show(ui);
                     super::markup_editor::spelling(ui, &output, id, &mut draft.text);
+                    super::markup_editor::reveal_cursor(ui, &output, id);
                     // Scroll the draft at its edges, or with the wheel, while selecting.
                     super::rich_text::scroll_text_selection(
                         ui,
@@ -544,6 +545,71 @@ mod tests {
         ]);
         assert!(submitted);
         assert_eq!(draft.text, "first\nsecond");
+    }
+
+    #[test]
+    fn a_new_line_past_the_bottom_of_the_draft_scrolls_to_it() {
+        let ctx = egui::Context::default();
+        crate::ui::theme::apply(&ctx);
+        let target = ComposeTarget {
+            conversation_id: "C1".into(),
+            thread_ts: None,
+        };
+        let mut draft = Draft {
+            text: (0..30)
+                .map(|line| format!("line {line:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            ..Default::default()
+        };
+        let id = target.editor_id();
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        let mut state = egui::text_edit::TextEditState::default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(draft.text.chars().count()),
+            )));
+        state.store(&ctx, id);
+        let mut time = 0.0;
+        // Whether the end of the draft is in view.
+        let mut frame = |events: Vec<egui::Event>| {
+            time += 1.0 / 60.0;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    events,
+                    focused: true,
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(500.0, 400.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    composer(ui, &target, &mut draft, "Message", None);
+                },
+            );
+            output.textures_delta.clear();
+            output
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) if text.galley.text().starts_with("line 00") => {
+                        Some(text.pos.y + text.galley.rect.height() <= clipped.clip_rect.bottom())
+                    }
+                    _ => None,
+                })
+                .expect("the draft is drawn")
+        };
+        frame(vec![]);
+        assert!(!frame(vec![]), "the draft starts scrolled to the top");
+        frame(vec![enter(egui::Modifiers::SHIFT, false)]);
+        for _ in 0..30 {
+            frame(vec![]);
+        }
+        assert!(frame(vec![]), "the new line is scrolled into view");
+        assert!(draft.text.ends_with("line 29\n"));
     }
 
     fn enter(modifiers: egui::Modifiers, repeat: bool) -> egui::Event {
