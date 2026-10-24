@@ -62,9 +62,6 @@ impl DraftStore {
         let Some(path) = &self.path else {
             return Ok(());
         };
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let keys: std::collections::BTreeSet<_> = drafts.keys().chain(synced.keys()).collect();
         let stored: Vec<_> = keys
             .into_iter()
@@ -75,10 +72,7 @@ impl DraftStore {
                 synced: synced.get(key).cloned(),
             })
             .collect();
-        // Write then rename, so a crash never leaves a half-written file.
-        let partial = path.with_extension("json.part");
-        std::fs::write(&partial, serde_json::to_vec_pretty(&stored)?)?;
-        std::fs::rename(&partial, path)
+        super::private_file::write(path, &serde_json::to_vec_pretty(&stored)?)
     }
 }
 

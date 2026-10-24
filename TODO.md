@@ -12,21 +12,21 @@ existing workspace session for live checks; no demo mode.
   incoming channel messages, mentions, and DMs, including muted conversations.
 - [ ] Check the latest smaller type and consistent margins at narrow and wide
   window sizes, including the emoji picker and image viewer.
-- [ ] Persist channel and thread drafts across restarts. Drafts currently survive
-  switching conversations but are kept only in memory.
 - [ ] Load older channel history when scrolling to the top, preserving the visible
   message position. Channel history currently fetches the latest 100 messages.
 
 ## Remaining features
 
 - [ ] Expand Cmd+P search to all people and channels, beyond loaded conversations.
-- [ ] Add native macOS notifications for mentions and DMs, respecting muted
-  conversations and avoiding duplicates with the active conversation.
-- [ ] Edit your own messages, with clear pending and failure states.
 - [ ] Delete your own messages, with confirmation and failure recovery.
 - [ ] Add byte-level upload progress, cancellation during upload, and a file chooser.
 
 ## Implemented
+
+- [x] Persist channel/thread draft text and sync it with Slack across devices.
+- [x] Native notifications for DMs/mentions, message editing, and spell checking.
+- [x] Public-repository CI and security reporting; owner-only atomic storage for
+  credentials, drafts, and cached videos.
 
 - [x] Paste images/screenshots and files copied in Finder into channel/thread
   drafts; thumbnails, filenames, removal, attachment-only sends, background
@@ -68,5 +68,5 @@ existing workspace session for live checks; no demo mode.
 - [x] Regression tests for channel-entry scrolling, resize layout, sidebar bounds,
   stale requests, drafts, unread state, and cached conversation switching.
 
-Validation baseline: 68 tests pass; formatting and Clippy are clean. Performance
+Validation baseline: 120 tests pass; formatting and Clippy are clean. Performance
 tests cover layout work, not live frame rate or measured energy consumption.

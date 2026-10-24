@@ -12,6 +12,7 @@ pub mod draft_store;
 pub mod emoji_usage_store;
 pub mod huddle_call;
 pub mod notifications;
+mod private_file;
 pub mod slack_api;
 pub mod slack_parsing;
 pub mod slack_realtime;

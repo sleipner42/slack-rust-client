@@ -37,6 +37,7 @@ representations = {
 }
 licenses = app / 'Contents/Resources/Licenses'
 licenses.mkdir(exist_ok=True)
+(licenses / 'THIRD_PARTY.md').write_text(Path('THIRD_PARTY.md').read_text())
 (licenses / 'Ubuntu-UFL.txt').write_text(Path('assets/fonts/UFL.txt').read_text())
 (licenses / 'en_US-dictionary-README.txt').write_text(Path('assets/dictionaries/en_US-README.txt').read_text())
 (licenses / 'sv_SE-dictionary-README.txt').write_text(Path('assets/dictionaries/sv_SE-README.txt').read_text())
