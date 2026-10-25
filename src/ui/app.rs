@@ -46,6 +46,10 @@ pub fn run(
     let options = eframe::NativeOptions {
         wgpu_options,
         viewport: egui::ViewportBuilder::default()
+            // The window title is the team name, which is what you want to read
+            // in a taskbar. The app_id must not be: it is how the desktop entry,
+            // window rules and icon lookup find us, so it stays constant.
+            .with_app_id("better-slack")
             .with_icon(
                 eframe::icon_data::from_png_bytes(include_bytes!("../../assets/app-icon.png"))
                     .expect("bundled app icon is valid PNG"),
