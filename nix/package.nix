@@ -12,6 +12,9 @@
   pkg-config,
   cmake,
   wrapGAppsHook3,
+  copyDesktopItems,
+  makeDesktopItem,
+  imagemagick,
   alsa-lib,
   dbus,
   glib-networking,
@@ -67,6 +70,8 @@ rustPlatform.buildRustPackage {
     pkg-config
     cmake # aws-lc-sys (rustls' aws-lc-rs backend) compiles C with it
     wrapGAppsHook3 # wires up GIO modules and GSettings schemas for the webview
+    copyDesktopItems
+    imagemagick # scales the app icon into the icon-theme sizes, see postInstall
   ];
 
   buildInputs = [
@@ -78,6 +83,42 @@ rustPlatform.buildRustPackage {
     openssl
     webkitgtk_4_1 # wry's webview
   ];
+
+  # Without this the binary is on PATH but invisible to any launcher in "drun"
+  # mode (fuzzel, rofi -show drun, wofi --show drun), because those list .desktop
+  # files and never look at PATH. `name` and `startupWMClass` both have to match
+  # the app_id set in src/ui/app.rs, or the window will not be associated back to
+  # this entry.
+  desktopItems = [
+    (makeDesktopItem {
+      name = "better-slack";
+      desktopName = "Better Slack"; # as the macOS CFBundleDisplayName
+      genericName = "Slack client";
+      comment = "Keyboard-driven Slack client";
+      exec = "better-slack";
+      icon = "better-slack";
+      startupWMClass = "better-slack";
+      categories = [
+        "Network"
+        "InstantMessaging"
+      ];
+      keywords = [
+        "Slack"
+        "Chat"
+      ];
+    })
+  ];
+
+  # assets/app-icon.png is 1254x1254. The icon theme spec only searches the
+  # standard size directories, so scale into those rather than leaving the
+  # original somewhere launchers have to guess at.
+  postInstall = ''
+    for size in 32 48 64 128 256 512; do
+      dir=$out/share/icons/hicolor/''${size}x''${size}/apps
+      mkdir -p "$dir"
+      magick assets/app-icon.png -resize "''${size}x''${size}" "$dir/better-slack.png"
+    done
+  '';
 
   # Hand the dlopen'd libraries to the wrapper wrapGAppsHook3 already creates,
   # rather than wrapping the binary a second time. /run/opengl-driver/lib is
