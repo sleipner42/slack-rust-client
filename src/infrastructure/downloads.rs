@@ -56,21 +56,32 @@ fn save_in(directory: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, SlackE
     )))
 }
 
-/// Where a video is kept for the system player, under the user cache folder.
-pub fn video_path(file_key: &str, name: &str) -> Result<PathBuf, SlackError> {
-    let directory = dirs::cache_dir()
+/// The folder cached videos live in. Does not create it.
+fn video_dir() -> Result<PathBuf, SlackError> {
+    Ok(dirs::cache_dir()
         .ok_or_else(|| SlackError("Could not find a cache folder.".into()))?
         .join("better-slack")
-        .join("videos");
-    std::fs::create_dir_all(&directory).map_err(|error| {
-        SlackError(format!("Could not create {}: {error}", directory.display()))
-    })?;
+        .join("videos"))
+}
+
+/// The file name a cached video gets: the key stripped to alphanumerics so it
+/// cannot escape the folder, joined to a sanitised version of the name.
+fn video_file_name(file_key: &str, name: &str) -> String {
     let key: String = file_key
         .chars()
         .filter(char::is_ascii_alphanumeric)
         .take(40)
         .collect();
-    Ok(directory.join(format!("{key}-{}", safe_name(name))))
+    format!("{key}-{}", safe_name(name))
+}
+
+/// Where a video is kept for the system player, under the user cache folder.
+pub fn video_path(file_key: &str, name: &str) -> Result<PathBuf, SlackError> {
+    let directory = video_dir()?;
+    std::fs::create_dir_all(&directory).map_err(|error| {
+        SlackError(format!("Could not create {}: {error}", directory.display()))
+    })?;
+    Ok(directory.join(video_file_name(file_key, name)))
 }
 
 /// Keep a downloaded video for replays, dropping videos unused for a week.
@@ -155,12 +166,15 @@ mod tests {
 
     #[test]
     fn cached_videos_get_safe_unique_names() {
-        let path = video_path("F1/../x", "../../Rendered video.mp4").unwrap();
         assert_eq!(
-            path.file_name().unwrap().to_str().unwrap(),
+            video_file_name("F1/../x", "../../Rendered video.mp4"),
             "F1x-Rendered video.mp4"
         );
-        assert!(path.parent().unwrap().ends_with("better-slack/videos"));
+    }
+
+    #[test]
+    fn cached_videos_live_under_the_user_cache_folder() {
+        assert!(video_dir().unwrap().ends_with("better-slack/videos"));
     }
 
     #[test]
