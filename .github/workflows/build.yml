@@ -1,0 +1,51 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      # GTK, WebKitGTK, a Rust toolchain and 764 crates of build artifacts do not
+      # fit comfortably in the ~14 GB a stock runner leaves free. This reclaims
+      # the preinstalled Android SDK and .NET, which we never use.
+      - uses: jlumbroso/free-disk-space@v2.0.0
+        with:
+          tool-cache: false
+          large-packages: false
+
+      - uses: actions/checkout@v7
+
+      - uses: cachix/install-nix-action@v31
+
+      # Serves two purposes: CI stops rebuilding what it already built, and the
+      # same cache feeds `nixos-rebuild` on a workstation, which is where the
+      # 764-crate compile actually hurts.
+      - uses: cachix/cachix-action@v17
+        with:
+          name: better-slack
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # Pull requests from forks cannot read secrets. Without this they fail
+          # trying to push rather than simply building without a push.
+          skipPush: ${{ github.event_name == 'pull_request' }}
+
+      - name: Build
+        run: nix build --print-build-logs
+
+      # Deliberately does NOT run the binary: it is a GUI app with no --version,
+      # so executing it in CI would open a window and hang until the job times
+      # out. Check the wrapper instead -- if wrapGAppsHook3 or the LD_LIBRARY_PATH
+      # prefix silently stopped applying, the build still succeeds and the app
+      # dies on a user's machine, which is exactly the regression worth catching.
+      - name: Check the wrapper carries its runtime libraries
+        run: |
+          test -x ./result/bin/better-slack
+          strings -a ./result/bin/better-slack | grep -q LD_LIBRARY_PATH
+          strings -a ./result/bin/better-slack | grep -q GIO_EXTRA_MODULES
