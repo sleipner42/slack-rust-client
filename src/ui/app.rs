@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use egui::AtomExt as _;
 
-use crate::application::chat_service::{ChatService, DisplayMessage, Workspace};
+use crate::application::chat_service::{ChatService, Conversations, DisplayMessage, Workspace};
 use crate::application::live_updates::{LiveStatus, spawn_live_updates};
 use crate::domain::gateway::RealtimeSource;
 use crate::domain::model::{Conversation, LiveEvent, ReadState, SlackError, ts_seconds};
@@ -156,6 +156,8 @@ struct ChatApp {
 
 enum UiEvent {
     WorkspaceLoaded(Result<Workspace, SlackError>),
+    /// The conversation list again, and the revision it was asked at.
+    ConversationsLoaded(u64, Result<Conversations, SlackError>),
     MessagesLoaded(ComposeTarget, Result<Vec<DisplayMessage>, SlackError>),
     MessagesCached(ComposeTarget, Vec<DisplayMessage>),
     MessagesPreview(ComposeTarget, Vec<DisplayMessage>),
@@ -2413,6 +2415,26 @@ impl ChatApp {
                         self.rebuild_sidebar();
                     }
                 }
+                UiEvent::ConversationsLoaded(revision, result) => match result {
+                    Ok(loaded) => {
+                        if let Some(workspace) = &mut self.workspace {
+                            workspace.conversations = loaded.conversations;
+                            workspace.sections = loaded.sections;
+                            if revision == self.revision {
+                                workspace.read_states = loaded.read_states;
+                            } else {
+                                // Keep read marks made while this was loading.
+                                for (id, state) in loaded.read_states {
+                                    workspace.read_states.entry(id).or_insert(state);
+                                }
+                            }
+                        }
+                        self.rebuild_sidebar();
+                    }
+                    Err(error) => {
+                        notify(&format!("Could not update the conversation list: {error}"))
+                    }
+                },
                 UiEvent::Live(status) => self.live_event(status),
                 UiEvent::HuddleNamed {
                     conversation_id,
@@ -2559,6 +2581,12 @@ impl ChatApp {
             }
             LiveEvent::EmojiChanged => {
                 self.spawn(|service| UiEvent::EmojiLoaded(service.emoji_catalog()));
+            }
+            LiveEvent::ConversationsChanged => {
+                let revision = self.revision;
+                self.spawn(move |service| {
+                    UiEvent::ConversationsLoaded(revision, service.conversations())
+                });
             }
             LiveEvent::HuddleChanged(huddle) => self.huddle_changed(huddle, false),
             LiveEvent::HuddleRinging {
@@ -3630,6 +3658,36 @@ mod tests {
         assert!(matches!(marked, (ref id, Ok(())) if id == "C1"));
         app.select(conversation(&app, "C2"));
         assert!(app.held_unread.is_none(), "leaving lets it be read again");
+    }
+
+    #[test]
+    fn a_conversation_joined_elsewhere_appears_without_a_restart() {
+        let mut app = app();
+        let workspace = app.workspace.as_mut().unwrap();
+        workspace.conversations.retain(|c| c.id != "C2");
+        workspace.read_states.remove("C2");
+        app.rebuild_sidebar();
+        app.live_event(LiveStatus::Event(Box::new(LiveEvent::ConversationsChanged)));
+        let (revision, loaded) = loop {
+            match app.receiver.recv_timeout(Duration::from_secs(5)).unwrap() {
+                UiEvent::ConversationsLoaded(revision, loaded) => break (revision, loaded),
+                _ => continue,
+            }
+        };
+        app.sender
+            .send(UiEvent::ConversationsLoaded(revision, loaded))
+            .unwrap();
+        app.drain_events();
+        let workspace = app.workspace.as_ref().unwrap();
+        assert!(workspace.conversations.iter().any(|c| c.id == "C2"));
+        assert!(
+            workspace
+                .sidebar
+                .iter()
+                .flat_map(|group| &group.conversations)
+                .any(|c| c.id == "C2"),
+            "the sidebar shows it"
+        );
     }
 
     #[test]

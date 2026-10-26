@@ -80,6 +80,14 @@ pub struct Workspace {
     pub people: Arc<Vec<crate::domain::people::Person>>,
 }
 
+/// The parts of a [`Workspace`] that change when the user joins or leaves a
+/// conversation.
+pub struct Conversations {
+    pub conversations: Vec<Conversation>,
+    pub sections: Vec<SidebarSection>,
+    pub read_states: HashMap<String, ReadState>,
+}
+
 pub struct ChatService {
     cache: Option<super::cache::DiskCache>,
     gateway: Arc<dyn SlackGateway>,
@@ -399,6 +407,22 @@ impl ChatService {
             emoji,
             emoji_usage,
             people: Default::default(),
+        })
+    }
+
+    /// The conversations the user is in, with their sidebar sections and read
+    /// states, again; after joining or leaving one.
+    pub fn conversations(&self) -> Result<Conversations, SlackError> {
+        let conversations = self.with_resolved_names(self.gateway.list_conversations()?);
+        lock(&self.conversation_names).extend(
+            conversations
+                .iter()
+                .map(|conversation| (conversation.id.clone(), conversation.name.clone())),
+        );
+        Ok(Conversations {
+            conversations,
+            sections: self.gateway.list_sections()?,
+            read_states: self.gateway.read_states()?,
         })
     }
 

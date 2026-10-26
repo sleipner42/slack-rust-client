@@ -234,6 +234,8 @@ pub enum LiveEvent {
     },
     /// A custom emoji was added, renamed or removed.
     EmojiChanged,
+    /// The user joined or left a conversation, or one of theirs was renamed.
+    ConversationsChanged,
     /// A draft was saved, here or in another Slack client.
     DraftSaved(RemoteDraft),
     /// A draft was sent or discarded.

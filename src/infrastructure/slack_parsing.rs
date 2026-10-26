@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::domain::model::{
     Attachment, Author, ChimeJoin, Conversation, ConversationKind, Huddle, LiveEvent, Message,
     Reaction, ReadState, RemoteDraft, SavedTodo, SavedTodoPage, SectionKind, SharedMessage,
-    SidebarSection, SlackError, UserProfile,
+    SidebarSection, SlackError, UserProfile, ts_seconds,
 };
 use crate::domain::people::Person;
 
@@ -232,6 +232,11 @@ pub fn parse_live_event(event: &Value) -> Option<LiveEvent> {
     match event["type"].as_str()? {
         "hello" => Some(LiveEvent::Connected),
         "emoji_changed" => Some(LiveEvent::EmojiChanged),
+        "channel_joined" | "group_joined" | "mpim_joined" | "im_created" | "channel_left"
+        | "group_left" | "mpim_close" | "channel_rename" | "group_rename" | "channel_archive"
+        | "group_archive" | "channel_unarchive" | "group_unarchive" => {
+            Some(LiveEvent::ConversationsChanged)
+        }
         "draft_create" | "draft_update" => Some(match parse_draft(&event["draft"]) {
             Some(draft) => LiveEvent::DraftSaved(draft),
             // Sent, scheduled or no longer tied to one conversation.
@@ -283,13 +288,26 @@ pub fn parse_read_states(body: &Value) -> HashMap<String, ReadState> {
         .flat_map(|group| body[*group].as_array().cloned().unwrap_or_default())
         .filter_map(|item| {
             let id = item["id"].as_str()?.to_string();
+            let latest_ts = non_zero_ts(&item["latest"]);
+            let last_read_ts = non_zero_ts(&item["last_read"]);
+            // Slack can keep counting a conversation as unread, with a mention,
+            // after it was read past its latest message; nothing is left to read.
+            let read_past_latest = matches!(
+                (&latest_ts, &last_read_ts),
+                (Some(latest), Some(read)) if ts_seconds(read) >= ts_seconds(latest)
+            );
             Some((
                 id,
                 ReadState {
-                    latest_ts: non_zero_ts(&item["latest"]),
-                    last_read_ts: non_zero_ts(&item["last_read"]),
-                    has_unreads: item["has_unreads"].as_bool().unwrap_or(false),
-                    mention_count: item["mention_count"].as_u64().unwrap_or(0) as u32,
+                    has_unreads: !read_past_latest
+                        && item["has_unreads"].as_bool().unwrap_or(false),
+                    mention_count: if read_past_latest {
+                        0
+                    } else {
+                        item["mention_count"].as_u64().unwrap_or(0) as u32
+                    },
+                    latest_ts,
+                    last_read_ts,
                 },
             ))
         })
@@ -1002,6 +1020,36 @@ mod todo_tests {
         assert_eq!(reply.conversation_name, "ops");
         assert_eq!(direct.thread_ts, None);
         assert!(!direct.is_channel);
+    }
+
+    #[test]
+    fn a_conversation_read_past_its_latest_message_is_read() {
+        let states = parse_read_states(&json!({"channels": [
+            {"id": "C1", "latest": "20.000000", "last_read": "20.500000",
+             "has_unreads": true, "mention_count": 1},
+            {"id": "C2", "latest": "20.000000", "last_read": "10.000000",
+             "has_unreads": true, "mention_count": 1}
+        ]}));
+        assert!(!states["C1"].has_unreads);
+        assert_eq!(states["C1"].mention_count, 0);
+        assert!(states["C2"].has_unreads);
+        assert_eq!(states["C2"].mention_count, 1);
+    }
+
+    #[test]
+    fn joining_or_leaving_a_conversation_reloads_the_list() {
+        for kind in [
+            "channel_joined",
+            "group_joined",
+            "channel_left",
+            "im_created",
+        ] {
+            assert_eq!(
+                parse_live_event(&json!({"type": kind, "channel": {"id": "C1"}})),
+                Some(LiveEvent::ConversationsChanged),
+                "{kind}"
+            );
+        }
     }
 
     #[test]
