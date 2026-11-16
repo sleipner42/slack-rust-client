@@ -16,11 +16,13 @@
   makeDesktopItem,
   imagemagick,
   alsa-lib,
+  aws-lc,
   dbus,
   glib-networking,
   gtk3,
   libsoup_3,
   openssl,
+  sqlite,
   webkitgtk_4_1,
   libGL,
   vulkan-loader,
@@ -68,19 +70,25 @@ rustPlatform.buildRustPackage {
 
   nativeBuildInputs = [
     pkg-config
-    cmake # aws-lc-sys (rustls' aws-lc-rs backend) compiles C with it
+    cmake # opusic-sys builds libopus with it (as does aws-lc-sys, when not given a system aws-lc)
     wrapGAppsHook3 # wires up GIO modules and GSettings schemas for the webview
     copyDesktopItems
     imagemagick # scales the app icon into the icon-theme sizes, see postInstall
   ];
 
+  # nixpkgs' cargo setup hook makes -sys crates link system libraries instead of their
+  # vendored copies (AWS_LC_SYS_USE_SYSTEM=1, LIBSQLITE3_SYS_USE_PKG_CONFIG=1), even when
+  # Cargo.toml asks for "bundled". So aws-lc and sqlite must be here, or the build fails
+  # with "requires a system-installed AWS-LC" and then "cannot find -lsqlite3".
   buildInputs = [
     alsa-lib # cpal, for notification sounds
+    aws-lc # aws-lc-sys (rustls' aws-lc-rs backend, webrtc's crypto)
     dbus # libdbus-sys links it; notify-rust desktop alerts
     glib-networking # the GIO TLS module -- without it HTTPS in the webview fails
     gtk3
     libsoup_3
     openssl
+    sqlite # libsqlite3-sys, for rusqlite
     webkitgtk_4_1 # wry's webview
   ];
 
